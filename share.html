@@ -5,30 +5,39 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>אלירן · שיתוף</title>
-<!-- The share page (docs/news_system.md, "דף שיתוף"). It lives on GitHub Pages (public repo eliran-media), a real
-     top-level https page, so navigator.share({files}) is allowed here (unlike inside the claude.ai frame).
-     The newsroom opens it as share.html#f=<file path in the repo>&app=Instagram&pick=Stories&c=<text to copy>.
-     The file is fetched as soon as the page loads, so the tap on "share" calls navigator.share with no await before it
-     (the browser only allows it straight from a tap). -->
+<!-- The share page (docs/news_system.md, "שיתוף לאינסטגרם מחדר החדשות"). It lives on GitHub Pages (public repo
+     eliran-media), a real top-level https page, so navigator.share({files}) is allowed here (unlike inside the claude.ai
+     frame, which has no web-share and can't reach any other site).
+     The newsroom opens it as share.html#app=Instagram&pick=Feed&c=<text to copy>&n=<file name>&d=<image>[&d=<image>…]:
+     each d is a JPEG in base64url, made by the newsroom from the rendered post. Nothing is uploaded anywhere, and the
+     image never reaches GitHub's server (the part after # stays in the browser).
+     A video is too big for a link, so it comes as f=<file path in this repo> (uploaded by the production run).
+     The files are ready before any tap, so "share" calls navigator.share with no await before it (the browser only
+     allows it straight from a tap). -->
 <style>
   :root { --bg: #14121a; --fg: #f4f1ea; --dim: #a9a3b4; --card: #221f2b; --accent: #ffd23f; --bad: #ff6b6b; }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }  /* .row / .copy set display: flex, which would beat the attribute */
   body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, "Segoe UI", Arial, sans-serif; }
   main { max-width: 480px; margin: 0 auto; padding: 16px 16px 40px; display: flex; flex-direction: column; gap: 14px; }
   h1 { font-size: 20px; margin: 4px 0 0; }
   .pick { color: var(--dim); margin: 0; }
   .media { background: var(--card); border-radius: 14px; overflow: hidden; display: flex; justify-content: center; }
-  .media img, .media video { display: block; max-width: 100%; max-height: 58vh; }
+  .media img, .media video { display: block; max-width: 100%; max-height: 52vh; }
+  .media.many { justify-content: flex-start; overflow-x: auto; gap: 8px; padding: 8px; scroll-snap-type: x mandatory; }
+  .media.many img { max-height: 40vh; border-radius: 8px; scroll-snap-align: center; }
   button, a.btn { font: inherit; border: 0; border-radius: 12px; padding: 14px; cursor: pointer; text-align: center; text-decoration: none; }
   #go { background: var(--accent); color: #14121a; font-size: 19px; font-weight: 700; }
   #go:disabled { opacity: .45; }
   .row { display: flex; gap: 10px; }
   .row > * { flex: 1; background: var(--card); color: var(--fg); }
   .copy { background: var(--card); border-radius: 12px; padding: 10px 12px; display: flex; gap: 10px; align-items: center; }
-  .copy span { flex: 1; overflow-wrap: anywhere; font-size: 14px; direction: auto; unicode-bidi: plaintext; }
+  .copy span { flex: 1; overflow-wrap: anywhere; font-size: 14px; direction: auto; unicode-bidi: plaintext; max-height: 7.5em; overflow-y: auto; white-space: pre-wrap; }
   .copy button { background: #353042; color: var(--fg); padding: 8px 12px; }
+  .hint { color: var(--dim); font-size: 14px; margin: 0; }
   #msg { min-height: 1.5em; margin: 0; }
   #msg.bad { color: var(--bad); }
+  #msg.ok { color: var(--accent); }
   details { color: var(--dim); font-size: 12px; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; }
 </style>
@@ -41,49 +50,83 @@
   <button id="go" disabled>טוען את הקובץ…</button>
   <p id="msg"></p>
   <div class="copy" id="copyBox" hidden><span id="copyText"></span><button id="copy">העתק</button></div>
-  <div class="row"><a class="btn" id="save" download>שמור את הקובץ</a></div>
+  <div class="row" id="saveRow"><a class="btn" id="save" download>שמור את הקובץ</a></div>
+  <p class="hint" id="saveHint" hidden>לשמירה: לחיצה ארוכה על תמונה ← "הורדת תמונה".</p>
   <details><summary>פרטים טכניים</summary><pre id="diag"></pre></details>
 </main>
 <script>
 (() => {
   const $ = id => document.getElementById(id);
   const q = new URLSearchParams(location.hash.slice(1) || location.search.slice(1));
-  const src = q.get("f") || "", app = q.get("app") || "Instagram", pick = q.get("pick") || "Stories", copy = q.get("c") || "";
-  const name = (src.split("/").pop() || "eliran").split("?")[0];
-  const isVideo = /\.(mp4|mov|webm)$/i.test(name);
-  const say = (t, bad) => { $("msg").textContent = t; $("msg").className = bad ? "bad" : ""; };
-  const diag = { ua: navigator.userAgent, share: typeof navigator.share, canShare: "?", file: src };
+  const src = q.get("f") || "", inline = q.getAll("d").filter(Boolean);
+  const app = q.get("app") || "Instagram", pick = q.get("pick") || "", copy = q.get("c") || "";
+  const base = (q.get("n") || "").replace(/[^\w.-]+/g, "_").slice(0, 60) || "eliran";
+  const isVideo = !inline.length && /\.(mp4|mov|webm)$/i.test(src);
+  const say = (t, cls) => { $("msg").textContent = t; $("msg").className = cls || ""; };
+  // What happened here, for a look on the phone (the only place it can be seen)
+  const diag = { ua: navigator.userAgent, share: typeof navigator.share, canShare: "?", via: inline.length ? "link" : "repo",
+    urlLength: location.href.length, opener: !!window.opener, file: src || undefined };
   const showDiag = () => { $("diag").textContent = JSON.stringify(diag, null, 1); };
 
   $("title").textContent = "שתף ל-" + app + (pick ? " · " + pick : "");
-  $("pick").textContent = "בחלון השיתוף בחרו " + app + (pick ? " ← \"" + pick + "\"" : "") + ". העורך של האפליקציה ייפתח עם הקובץ.";
+  $("pick").textContent = "בחלון השיתוף בחרו " + app + (pick ? ", ובו " + pick : "") + ". העורך של " + app + " ייפתח עם "
+    + (inline.length > 1 ? "התמונות" : "הקובץ") + ".";
+  const copyIt = () => navigator.clipboard ? navigator.clipboard.writeText(copy).then(() => true, () => false) : Promise.resolve(false);
   if (copy) {
     $("copyBox").hidden = false; $("copyText").textContent = copy;
-    $("copy").onclick = () => navigator.clipboard.writeText(copy).then(() => say("הועתק."), () => say("ההעתקה לא עבדה. סמנו את הטקסט והעתיקו.", true));
+    $("copy").onclick = () => copyIt().then(ok => ok ? say("הועתק.", "ok") : say("ההעתקה לא עבדה. סמנו את הטקסט והעתיקו.", "bad"));
   }
-  // Relative paths only: the page shares files of its own repo, never a URL someone put in the link
-  if (!src || /^[a-z]+:|^\/\//i.test(src) || src.includes("..")) { $("go").textContent = "אין קובץ"; say("בקישור אין קובץ לשיתוף.", true); showDiag(); return; }
 
-  const el = document.createElement(isVideo ? "video" : "img");
-  el.src = src; if (isVideo) { el.controls = true; el.playsInline = true; el.muted = true; } else el.alt = "";
-  $("media").appendChild(el);
-  $("save").href = src; $("save").download = name;
+  let files = null;
+  const ready = list => {
+    files = list;
+    let can = false; try { can = !!navigator.canShare?.({ files }); } catch (e) { diag.canShareError = String(e); }
+    diag.canShare = can; diag.files = files.map(f => f.name + " " + Math.round(f.size / 1024) + "KB " + f.type); showDiag();
+    if (can) { $("go").disabled = false; $("go").textContent = "שתף ל-" + app + (copy ? " (והעתק " + (/^https?:/.test(copy) ? "קישור" : "כיתוב") + ")" : ""); }
+    else { $("go").textContent = "חלון השיתוף לא זמין כאן"; say("הדפדפן הזה לא משתף קבצים. שמרו את הקובץ ושתפו מהגלריה, או פתחו ב-Chrome בטלפון.", "bad"); }
+  };
 
-  let file = null;
-  fetch(src).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); }).then(b => {
-    file = new File([b], name, { type: b.type || (isVideo ? "video/mp4" : "image/png") });
-    let can = false; try { can = !!navigator.canShare?.({ files: [file] }); } catch (e) { diag.canShareError = String(e); }
-    diag.canShare = can; diag.size = file.size; diag.type = file.type; showDiag();
-    if (can) { $("go").disabled = false; $("go").textContent = "שתף ל-" + app; }
-    else { $("go").textContent = "חלון השיתוף לא זמין כאן"; say("הדפדפן הזה לא משתף קבצים. שמרו את הקובץ ושתפו מהגלריה, או נסו ב-Chrome בטלפון.", true); }
-  }).catch(e => { diag.fetchError = String(e); showDiag(); $("go").textContent = "הקובץ לא נטען"; say("הקובץ לא נטען (" + e.message + ").", true); });
+  if (inline.length) {
+    // The image(s) came inside the link: base64url JPEG -> File, no network at all
+    try {
+      const list = inline.map((d, i) => {
+        let s = d.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
+        const bin = atob(s), u = new Uint8Array(bin.length);
+        for (let j = 0; j < bin.length; j++) u[j] = bin.charCodeAt(j);
+        return new File([u], base + (inline.length > 1 ? "-" + (i + 1) : "") + ".jpg", { type: "image/jpeg" });
+      });
+      if (list.length > 1) $("media").classList.add("many");
+      for (const f of list) { const img = document.createElement("img"); img.src = URL.createObjectURL(f); img.alt = ""; $("media").appendChild(img); }
+      if (list.length > 1) { $("saveRow").hidden = true; $("saveHint").hidden = false; }
+      else { $("save").href = $("media").firstChild.src; $("save").download = list[0].name; }
+      ready(list);
+    } catch (e) { diag.decodeError = String(e); showDiag(); $("go").textContent = "התמונה לא נקראה"; say("הקישור נקטע או השתבש. חזרו לחדר החדשות ולחצו שוב.", "bad"); }
+  } else if (src && !/^[a-z]+:|^\/\//i.test(src) && !src.includes("..")) {
+    // A file of this repo (relative paths only: never a URL someone put in the link)
+    const name = (src.split("/").pop() || "eliran").split("?")[0];
+    const el = document.createElement(isVideo ? "video" : "img");
+    el.src = src; if (isVideo) { el.controls = true; el.playsInline = true; el.muted = true; } else el.alt = "";
+    $("media").appendChild(el);
+    $("save").href = src; $("save").download = name;
+    fetch(src).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+      .then(b => ready([new File([b], name, { type: b.type || (isVideo ? "video/mp4" : "image/png") })]))
+      .catch(e => { diag.fetchError = String(e); showDiag(); $("go").textContent = "הקובץ לא נטען"; say("הקובץ לא נטען (" + e.message + ").", "bad"); });
+  } else { $("go").textContent = "אין קובץ"; say("בקישור אין קובץ לשיתוף.", "bad"); $("saveRow").hidden = true; }
   showDiag();
 
-  // Straight from the tap: nothing awaited before share()
+  // Straight from the tap: nothing awaited before share(). The copy starts first (it doesn't use up the tap).
   $("go").onclick = () => {
-    if (!file) return;
-    navigator.share({ files: [file] }).then(() => { diag.result = "shared"; showDiag(); say("נשלח ל-" + app + ". פרסמו שם, ואז חזרו לחדר החדשות וסמנו ✓."); },
-      e => { diag.result = e && e.name; showDiag(); if (e && e.name === "AbortError") return; say("חלון השיתוף נכשל (" + (e && e.name) + "). שמרו את הקובץ ושתפו מהגלריה.", true); });
+    if (!files) return;
+    const copied = copy ? copyIt() : Promise.resolve(false);
+    navigator.share({ files }).then(async () => {
+      diag.result = "shared"; showDiag();
+      const c = await copied;
+      say((c ? (/^https?:/.test(copy) ? "הקישור הועתק (למדבקת קישור). " : "הכיתוב הועתק: הדביקו אותו ב-" + app + ". ") : "")
+        + "אחרי הפרסום חזרו לחדר החדשות ולחצו \"✓ פרסמתי\".", "ok");
+    }, e => {
+      diag.result = e && e.name; showDiag(); if (e && e.name === "AbortError") return;
+      say("חלון השיתוף נכשל (" + (e && e.name) + "). שמרו את הקובץ ושתפו מהגלריה.", "bad");
+    });
   };
 })();
 </script>
