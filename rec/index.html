@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#16101C">
+<link rel="icon" href="data:,">
+<title>אלירן · הקלטה</title>
+<!-- Phone recording page (docs/phone_recording.md). GitHub Pages of the public repo eliran-media: only code lives here.
+     The VRM is picked from the phone and kept in this browser's IndexedDB; it is never uploaded anywhere.
+     three.js + three-vrm render the model, MediaPipe Face Landmarker tracks the front camera, MediaRecorder records
+     the canvas + the microphone. Versions are pinned; bump them together and re-test. -->
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/",
+  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js",
+  "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs"
+} }
+</script>
+<style>
+  :root { --ink: #16101C; --plum: #5B2140; --card: #241a2c; --line: #3a2c45; --cream: #FFF6EE; --dim: #b9adc4;
+          --raspberry: #E8456B; --hot: #FFD23F; --ok: #A6E35A; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; background: var(--ink); color: var(--cream);
+               font: 16px/1.4 system-ui, "Segoe UI", Arial, sans-serif; overscroll-behavior: none; }
+  body { display: flex; flex-direction: column; height: 100dvh; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; min-height: 40px; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 700; white-space: nowrap; }
+  #fps { margin-inline-start: auto; direction: ltr; font: 11px/1.3 ui-monospace, Consolas, monospace; color: var(--dim);
+         overflow: hidden; text-overflow: ellipsis; min-width: 0;
+         background: var(--card); border-radius: 8px; padding: 3px 8px; white-space: nowrap; }
+  #fps b { color: var(--cream); font-weight: 600; }
+  #fps .warn { color: var(--hot); } #fps .bad { color: var(--raspberry); }
+  .stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; position: relative; padding: 0 8px; }
+  #view { height: 100%; max-width: 100%; aspect-ratio: 9 / 16; border-radius: 14px; background: var(--plum); display: block; }
+  #cam { position: absolute; top: 8px; inset-inline-end: 16px; width: 26%; max-width: 140px; border-radius: 10px;
+         transform: scaleX(-1); border: 2px solid var(--line); background: #000; }
+  #rec-dot { position: absolute; top: 14px; inset-inline-start: 18px; background: var(--raspberry); color: #fff; font-weight: 700;
+             border-radius: 999px; padding: 4px 12px; font-size: 15px; }
+  #status { position: absolute; inset-inline: 24px; bottom: 16px; text-align: center; background: rgba(22,16,28,.82);
+            border-radius: 12px; padding: 10px 12px; font-size: 15px; }
+  #status.bad { color: var(--raspberry); }
+  .controls { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
+  button, .btn { font: inherit; border: 0; border-radius: 12px; padding: 13px 14px; cursor: pointer; text-align: center;
+                 text-decoration: none; color: var(--cream); background: var(--card); }
+  button:disabled { opacity: .45; }
+  .main { background: var(--hot); color: var(--ink); font-size: 19px; font-weight: 700; padding: 15px; }
+  .main.rec { background: var(--raspberry); color: #fff; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .chips button { flex: none; padding: 8px 12px; font-size: 14px; border: 1px solid var(--line); background: transparent; }
+  .chips button[aria-pressed="true"] { background: var(--card); border-color: var(--hot); }
+  .hint { color: var(--dim); font-size: 14px; margin: 0; text-align: center; }
+  /* result sheet */
+  #result { position: fixed; inset: 0; background: rgba(10,7,14,.96); display: flex; flex-direction: column; gap: 10px;
+            padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); z-index: 5; }
+  #result video { flex: 1; min-height: 0; width: 100%; object-fit: contain; border-radius: 12px; background: #000; }
+  #result .meta { color: var(--dim); font-size: 13px; text-align: center; direction: rtl; }
+  #pick-input { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>אלירן · הקלטה</h1>
+  <div id="fps" aria-live="off">—</div>
+</header>
+
+<div class="stage">
+  <canvas id="view" width="720" height="1280"></canvas>
+  <video id="cam" playsinline muted hidden></video>
+  <div id="rec-dot" hidden>● 10</div>
+  <div id="status" role="status">טוען…</div>
+</div>
+
+<div class="controls">
+  <input id="pick-input" type="file" accept=".vrm,model/gltf-binary,application/octet-stream">
+  <button id="pick" class="main" hidden>בחר קובץ VRM מהטלפון</button>
+  <button id="start" class="main" hidden>הפעל מצלמה ומיקרופון</button>
+  <button id="record" class="main" hidden>● הקלט 10 שניות</button>
+  <div id="chips" class="chips" hidden>
+    <button id="t-mirror" aria-pressed="true">מראה</button>
+    <button id="t-cam" aria-pressed="false">הצג מצלמה</button>
+    <button id="t-frame" aria-pressed="false">קרוב</button>
+    <button id="calib">כייל (פנים רגילות)</button>
+    <button id="swap">החלף מודל</button>
+  </div>
+  <p id="hint" class="hint" hidden></p>
+</div>
+
+<div id="result" hidden>
+  <video id="playback" controls playsinline></video>
+  <div class="meta" id="meta"></div>
+  <div class="row">
+    <button id="share" class="main">שתף</button>
+    <a id="save" class="btn" download>שמור</a>
+  </div>
+  <button id="again">הקלטה חדשה</button>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
