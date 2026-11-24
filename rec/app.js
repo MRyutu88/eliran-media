@@ -2,12 +2,23 @@
 // live tracking -> record a take (start/stop, up to MAX_MS) = the video + a performance file (take.js) -> takes list
 // (play, share, save, delete) -> "נגן מחדש" drives Eliran from the file, and can record that to a new video.
 // Text in Hebrew; values from files are set with textContent.
-import { createStage } from "./avatar.js";
-import { createTracker } from "./tracking.js";
-import { FaceRig } from "./mapping.js";
-import { startRecording, pickType, frameDrawn } from "./recorder.js";
-import { TakeWriter, readTake, createReplay, EXT } from "./take.js";
+import { createStage } from "./avatar.js?v=3";
+import { createTracker } from "./tracking.js?v=3";
+import { FaceRig } from "./mapping.js?v=3";
+import { startRecording, pickType, frameDrawn } from "./recorder.js?v=3";
+import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=3";
 
+// Must match <meta name="rec-version"> in index.html. A different value = the phone mixed cached files from two
+// versions: reload once with a fresh URL (index.html then comes fresh and asks for matching files).
+const REC_VERSION = "3";
+if (document.querySelector('meta[name="rec-version"]')?.content !== REC_VERSION) {
+  const key = "rec-reload-" + REC_VERSION;
+  if (!sessionStorage.getItem(key)) {
+    sessionStorage.setItem(key, "1");
+    location.replace(location.pathname + "?r=" + Date.now());
+  }
+  throw new Error("stale index.html");
+}
 const MAX_MS = 90_000; // longest take (25.11: 90 s until the user decides otherwise)
 const fmt = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 const $ = (id) => document.getElementById(id);
@@ -43,8 +54,11 @@ function idb(mode, fn, store = STORE) {
       if (!db.objectStoreNames.contains(TAKES)) db.createObjectStore(TAKES, { keyPath: "id" });
     };
     open.onerror = () => reject(open.error);
+    open.onblocked = () => reject(new Error("blocked"));
     open.onsuccess = () => {
-      const db = open.result, tx = db.transaction(store, mode), req = fn(tx.objectStore(store));
+      const db = open.result;
+      db.onversionchange = () => db.close();
+      const tx = db.transaction(store, mode), req = fn(tx.objectStore(store));
       tx.oncomplete = () => { db.close(); resolve(req?.result); };
       tx.onerror = () => { db.close(); reject(tx.error); };
     };
@@ -417,7 +431,7 @@ function playReplay(recording) {
   updateReplayBar();
 }
 function updateReplayBar() {
-  if (!rp) return;
+  if (!rp?.replay) return; // still loading the file
   ui.rpTitle.textContent = `${rp.recCtl ? "● מקליט" : "▶ מנגן מחדש"}: ${rp.t.name} · ${fmt(Math.min(rp.tv, rp.replay.durationMs))} / ${fmt(rp.replay.durationMs)}`;
   ui.rpAgain.disabled = ui.rpRec.disabled = !!rp.recCtl;
   ui.rpRec.textContent = rp.recCtl ? "מקליט…" : "● הקלט לוידאו חדש";
@@ -518,6 +532,8 @@ function loop(now) {
 }
 requestAnimationFrame(loop);
 
+window.__recBooted = true; // index.html boot guard
+
 // ---- boot ---------------------------------------------------------------------------------------------------
 (async () => {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
@@ -531,7 +547,13 @@ requestAnimationFrame(loop);
     return;
   }
   let saved = null;
-  try { saved = await readModel(); } catch (e) { console.warn(e); }
+  try { saved = await readModel(); } catch (e) {
+    console.warn(e);
+    if (e?.message === "blocked") {
+      say("הדף פתוח גם בלשונית אחרת עם גרסה ישנה. לסגור את הלשוניות האחרות של הדף ולרענן.", true);
+      return;
+    }
+  }
   if (saved?.blob) await loadModel(saved.blob, saved.name);
   else { say("בפעם הראשונה: בוחרים את קובץ ה-VRM של אלירן. הוא נשאר רק בטלפון ולא עולה לשום מקום."); showMain(ui.pick); }
 })();

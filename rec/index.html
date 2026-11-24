@@ -139,6 +139,32 @@
   <ul id="takes-list"></ul>
 </div>
 
-<script type="module" src="app.js"></script>
+<!-- REC_VERSION: bump it here, in app.js and in every local import ("?v=") on each publish (docs/phone_recording.md,
+     "Updates and the phone's cache"). GitHub Pages lets the phone cache each file for 10 minutes; mixed old/new files
+     crashed the page on "טוען…" (25.11). -->
+<meta name="rec-version" content="3">
+<script>
+  // Boot guard: if the page code fails to load or crashes before it starts, say so (with a fresh reload) instead of
+  // "טוען…" forever.
+  (function () {
+    function fail(why) {
+      if (window.__recBooted || window.__recFailed) return;
+      window.__recFailed = true;
+      var s = document.getElementById("status");
+      if (!s) return;
+      s.hidden = false; s.className = "bad";
+      s.textContent = "הדף לא נטען (" + why + "). ";
+      var b = document.createElement("button");
+      b.textContent = "רענן";
+      b.style.marginTop = "8px";
+      b.onclick = function () { location.replace(location.pathname + "?r=" + Date.now()); };
+      s.appendChild(b);
+    }
+    window.__recBootFail = fail;
+    window.addEventListener("error", function (e) { fail((e && e.message) || "שגיאה"); });
+    setTimeout(function () { fail("לקח יותר מדי זמן, אולי אין אינטרנט"); }, 40000);
+  })();
+</script>
+<script type="module" src="app.js?v=3" onerror="__recBootFail('קובץ חסר')"></script>
 </body>
 </html>
