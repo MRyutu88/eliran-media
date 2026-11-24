@@ -10,7 +10,7 @@ const $ = (id) => document.getElementById(id);
 const ui = {
   view: $("view"), cam: $("cam"), status: $("status"), fps: $("fps"), dot: $("rec-dot"), hint: $("hint"),
   pick: $("pick"), input: $("pick-input"), start: $("start"), record: $("record"), chips: $("chips"),
-  mirror: $("t-mirror"), showCam: $("t-cam"), frame: $("t-frame"), calib: $("calib"), swap: $("swap"),
+  micRetry: $("mic-retry"), mirror: $("t-mirror"), showCam: $("t-cam"), frame: $("t-frame"), calib: $("calib"), swap: $("swap"),
   result: $("result"), playback: $("playback"), meta: $("meta"), share: $("share"), save: $("save"), again: $("again"),
 };
 
@@ -76,34 +76,82 @@ ui.input.onchange = async () => {
 };
 
 // ---- camera, mic, tracking ----------------------------------------------------------------------------------
+// Camera and mic are asked for separately (25.11, phone bug): one combined call fails as a whole when only the mic is
+// refused (site setting, or Chrome has no Android microphone permission), and the page then said "no permission"
+// although the camera was allowed. Now a refused mic means recording without sound, and every error names the device.
+const VIDEO = { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } };
+const HOWTO = {
+  camera: "בכרום: לחיצה על הסמל שליד הכתובת, \"הרשאות\", ולאפשר מצלמה. אם זה לא עוזר: הגדרות הטלפון, אפליקציות, Chrome, הרשאות, מצלמה.",
+  mic: "בכרום: לחיצה על הסמל שליד הכתובת, \"הרשאות\", ולאפשר מיקרופון. אם זה לא עוזר: הגדרות הטלפון, אפליקציות, Chrome, הרשאות, מיקרופון.",
+};
+function deviceError(device, e) {
+  const name = e?.name || "Error", what = device === "camera" ? "למצלמה" : "למיקרופון";
+  if (name === "NotAllowedError" || name === "SecurityError") return `אין הרשאה ${what} (${name}). ${HOWTO[device]}`;
+  if (name === "NotFoundError" || name === "OverconstrainedError") return `לא נמצא${device === "camera" ? "ה מצלמה" : " מיקרופון"} (${name}).`;
+  if (name === "NotReadableError" || name === "AbortError") return `${device === "camera" ? "המצלמה תפוסה" : "המיקרופון תפוס"} באפליקציה אחרת (${name}). לסגור אותה ולנסות שוב.`;
+  return `לא הצלחתי להפעיל ${device === "camera" ? "את המצלמה" : "את המיקרופון"} (${name}).`;
+}
+let micError = null;
+async function openMic() {
+  try {
+    const a = await navigator.mediaDevices.getUserMedia({ audio: true });
+    for (const t of a.getAudioTracks()) media.addTrack(t);
+    micError = null;
+  } catch (e) {
+    console.warn("mic", e);
+    micError = e;
+  }
+  showMicState();
+}
+function showMicState() {
+  ui.micRetry.hidden = !micError;
+  ui.record.textContent = `● הקלט ${SECONDS} שניות${micError ? " (בלי קול)" : ""}`;
+  if (micError) { ui.hint.hidden = false; ui.hint.textContent = "מקליט בלי קול: " + deviceError("mic", micError); }
+}
+
 ui.start.onclick = async () => {
   if (busy) return;
   busy = true;
   ui.start.disabled = true;
+  let step = "camera";
   try {
-    say("מבקש גישה למצלמה ולמיקרופון…");
-    media = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
-      audio: true,
-    });
-    ui.cam.srcObject = media;
-    await ui.cam.play();
+    if (!media) {
+      say("מבקש גישה למצלמה…");
+      media = await navigator.mediaDevices.getUserMedia({ video: VIDEO });
+      step = "mic";
+      say("מבקש גישה למיקרופון…");
+      await openMic();
+      step = "camera";
+      ui.cam.srcObject = media;
+      await ui.cam.play().catch((e) => console.warn("preview play", e)); // muted, so this should not block
+    }
+    step = "tracker";
     say("טוען מעקב פנים… (בפעם הראשונה כמה שניות)");
     tracker = await createTracker();
     say("");
     show(ui.record);
+    showMicState();
     keepAwake();
   } catch (e) {
-    console.error(e);
-    media?.getTracks().forEach((t) => t.stop());
-    media = null;
-    const denied = e?.name === "NotAllowedError";
-    say(denied ? "אין הרשאה למצלמה או למיקרופון. אפשר להפעיל בהגדרות האתר בדפדפן ולנסות שוב."
-               : "לא הצלחתי להפעיל את המצלמה או את מעקב הפנים.", true);
+    console.error(step, e);
+    if (step === "tracker") {
+      say(`המצלמה עובדת, אבל מעקב הפנים לא נטען (${e?.name || "Error"}). לבדוק חיבור לאינטרנט וללחוץ שוב.`, true);
+    } else {
+      media?.getTracks().forEach((t) => t.stop());
+      media = null;
+      say(deviceError("camera", e), true);
+    }
   } finally {
     busy = false;
     ui.start.disabled = false;
   }
+};
+ui.micRetry.onclick = async () => {
+  if (busy || !media) return;
+  busy = true;
+  await openMic();
+  busy = false;
+  if (!micError) { ui.hint.textContent = "המיקרופון עובד ✓"; }
 };
 
 async function keepAwake() {
@@ -143,7 +191,7 @@ ui.record.onclick = async () => {
     ui.dot.hidden = true;
     ui.record.disabled = false;
     ui.record.classList.remove("rec");
-    ui.record.textContent = `● הקלט ${SECONDS} שניות`;
+    showMicState();
   }
 };
 
@@ -208,6 +256,12 @@ requestAnimationFrame(loop);
     say("הדף צריך לרוץ ב-https כדי לגשת למצלמה.", true);
   }
   if (pickType() === null) ui.hint.textContent = "הדפדפן הזה לא יודע להקליט וידאו.";
+  // WhatsApp / Instagram / Facebook / Gmail open links in their own WebView, which usually blocks the camera.
+  if (/; wv\)|FBAN|FBAV|Instagram|WhatsApp|Line\//.test(navigator.userAgent)) {
+    say("הדף נפתח בתוך אפליקציה, ושם המצלמה בדרך כלל חסומה. לפתוח ב-Chrome: בתפריט ⋮ לבחור \"פתיחה ב-Chrome\" (או להעתיק את הקישור ל-Chrome).", true);
+    window.__rec.inApp = true;
+    return;
+  }
   let saved = null;
   try { saved = await readModel(); } catch (e) { console.warn(e); }
   if (saved?.blob) await loadModel(saved.blob, saved.name);
