@@ -10,7 +10,8 @@
 <!-- Phone recording page (docs/phone_recording.md). GitHub Pages of the public repo eliran-media: only code lives here.
      The VRM is picked from the phone and kept in this browser's IndexedDB; it is never uploaded anywhere.
      three.js + three-vrm render the model, MediaPipe Face Landmarker tracks the front camera, MediaRecorder records
-     the canvas + the microphone. Versions are pinned; bump them together and re-test. -->
+     the canvas + the microphone, and each take also keeps a performance file (take.js) that "נגן מחדש" replays.
+     Versions are pinned; bump them together and re-test. -->
 <script type="importmap">
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
@@ -61,6 +62,20 @@
   #result video { flex: 1; min-height: 0; width: 100%; object-fit: contain; border-radius: 12px; background: #000; }
   #result .meta { color: var(--dim); font-size: 13px; text-align: center; direction: rtl; }
   #pick-input { display: none; }
+  .chips button.danger { color: var(--raspberry); }
+  #rec-dot { direction: ltr; }
+  /* takes list */
+  #takes { position: fixed; inset: 0; background: rgba(10,7,14,.97); display: flex; flex-direction: column; gap: 10px;
+           padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); z-index: 6; }
+  #takes header { padding: 0; }
+  #takes-close { margin-inline-start: auto; padding: 8px 14px; }
+  #takes-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 10px; }
+  #takes-list li { background: var(--card); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  #takes-list li span { display: block; color: var(--dim); font-size: 14px; }
+  #takes-list .chips { justify-content: flex-start; }
+  /* replay bar */
+  #replay-bar { display: flex; flex-direction: column; gap: 8px; }
+  #rp-title { margin: 0; text-align: center; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -72,7 +87,7 @@
 <div class="stage">
   <canvas id="view" width="720" height="1280"></canvas>
   <video id="cam" playsinline muted hidden></video>
-  <div id="rec-dot" hidden>● 10</div>
+  <div id="rec-dot" hidden>● 0:00</div>
   <div id="status" role="status">טוען…</div>
 </div>
 
@@ -80,13 +95,25 @@
   <input id="pick-input" type="file" accept=".vrm,model/gltf-binary,application/octet-stream">
   <button id="pick" class="main" hidden>בחר קובץ VRM מהטלפון</button>
   <button id="start" class="main" hidden>הפעל מצלמה ומיקרופון</button>
-  <button id="record" class="main" hidden>● הקלט 10 שניות</button>
+  <button id="record" class="main" hidden>● התחל הקלטה</button>
+  <div id="replay-bar" hidden>
+    <p id="rp-title">▶ מנגן מחדש</p>
+    <div class="row">
+      <button id="rp-rec" class="main">● הקלט לוידאו חדש</button>
+    </div>
+    <div class="row">
+      <button id="rp-again">▶ מההתחלה</button>
+      <button id="rp-stop">■ חזרה למצלמה</button>
+    </div>
+  </div>
   <div id="chips" class="chips" hidden>
     <button id="t-mirror" aria-pressed="true">מראה</button>
     <button id="t-cam" aria-pressed="false">הצג מצלמה</button>
-    <button id="t-frame" aria-pressed="false">קרוב</button>
+    <button id="f-body" aria-pressed="true">מלא</button>
+    <button id="f-close" aria-pressed="false">קרוב</button>
     <button id="mic-retry" hidden>🎤 לנסות מיקרופון שוב</button>
     <button id="calib">כייל (פנים רגילות)</button>
+    <button id="takes-btn">🎞 הקלטות</button>
     <button id="swap">החלף מודל</button>
   </div>
   <p id="hint" class="hint" hidden></p>
@@ -97,9 +124,19 @@
   <div class="meta" id="meta"></div>
   <div class="row">
     <button id="share" class="main">שתף</button>
-    <a id="save" class="btn" download>שמור</a>
+    <a id="save" class="btn" download>שמור וידאו</a>
   </div>
-  <button id="again">הקלטה חדשה</button>
+  <div class="row">
+    <button id="result-replay">↻ נגן מחדש</button>
+    <button id="save-perf">שמור קובץ ביצוע</button>
+  </div>
+  <button id="again">סגור</button>
+</div>
+
+<div id="takes" hidden>
+  <header><h1>🎞 הקלטות</h1><button id="takes-close">סגור</button></header>
+  <p id="takes-note" class="hint"></p>
+  <ul id="takes-list"></ul>
 </div>
 
 <script type="module" src="app.js"></script>

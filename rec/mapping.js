@@ -41,6 +41,9 @@ const swapSide = (n) => n.includes("Left") ? n.replace("Left", "Right") : n.incl
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const D2R = Math.PI / 180;
 
+// The constants in effect, written into every performance file (take.js) so a later retune knows what was used.
+export const MAPPING = { version: 1, LOST_MS, MAX_YAW, MAX_PITCH, MAX_ROLL, SPLIT, SPINE, RANGE, FILTER };
+
 export class FaceRig {
   constructor(vrm) {
     this.vrm = vrm;
@@ -94,6 +97,27 @@ export class FaceRig {
     if (this.raw) this.offset = { ...this.raw };
     if (this.shapes) this.base = { ...this.shapes };
   }
+
+  // Full mapping state with times relative to t0, so a replay (take.js) can start from exactly where the live rig was
+  // when the take began: One Euro state per channel, held values, head, calibration and mirror.
+  snapshot(t0) {
+    const filters = {};
+    for (const [n, f] of this.filters) filters[n] = { x: f.x, dx: f.dx, t: f.t - t0 };
+    return { mirror: this.mirror, offset: { ...this.offset }, base: { ...this.base }, target: { ...this.target },
+             head: { ...this.head }, lastSeen: this.lastSeen - t0, filters };
+  }
+  restore(s) {
+    this.mirror = s.mirror; this.offset = { ...s.offset }; this.base = { ...s.base }; this.target = { ...s.target };
+    this.head = { ...s.head }; this.lastSeen = s.lastSeen;
+    this.filters = new Map();
+    for (const [n, v] of Object.entries(s.filters || {})) {
+      const [mc, beta] = filterFor(n), fl = new OneEuro(mc, beta);
+      Object.assign(fl, { x: v.x, dx: v.dx, t: v.t });
+      this.filters.set(n, fl);
+    }
+  }
+  // Calibration from a recorded event (the values the live "כייל" stored).
+  setCalibration(offset, base) { this.offset = { ...offset }; this.base = { ...base }; }
 
   // Every render frame: write the held values to the model (ease to neutral when the face is lost).
   apply(dt, t) {
