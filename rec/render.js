@@ -4,7 +4,7 @@
 // into MP4 with mp4-muxer. Nothing depends on how fast the phone is: a slow phone takes longer, the file is the same.
 // Hat physics (spring bones) run on a fixed 1/60 s step from a settled start, so two renders give the same frames.
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
-import { sceneAt, applyScene } from "./edit.js?v=4";
+import { sceneAt, applyScene } from "./edit.js?v=5";
 
 const PHYS_DT = 1 / 60, SETTLE = 90; // physics step; steps at the start pose before frame 0 so the hat is at rest
 export const SIZES = { "720": [720, 1280], "1080": [1080, 1920] };

@@ -7,11 +7,14 @@
 //   MediaPipe works on the raw (non-mirrored) camera image; its face frame has +X = the person's left, the same as a
 //   VRM 1.0 model facing +Z, so "not mirrored" = copy as is.
 // - One Euro smoothing per channel; no face for LOST_MS -> ease back to neutral.
+// - Head position (since version 5): the matrix translation (cm) minus a neutral position (the first detection, or
+//   "כייל"), smoothed and clamped, in this.pos. It drives the body (body.js); this file writes only neck and head.
 import * as THREE from "three";
 
 const LOST_MS = 400;
 const MAX_YAW = 40, MAX_PITCH = 30, MAX_ROLL = 30; // degrees
 const SPLIT = { neck: 0.4, head: 0.6 }, SPINE = { yaw: 0.15, roll: 0.1 };
+const MAX_POS = { x: 20, y: 20, z: 25 }; // cm from the neutral position
 
 // Remap raw MediaPipe scores: [lo, hi] -> [0, 1]. MediaPipe rarely reaches 1 (a shut eye is ~0.6-0.8).
 const RANGE = {
@@ -21,7 +24,7 @@ const RANGE = {
 // browDown sits at ~0.3-0.75 on a resting or smiling face (MediaPipe reads squinting as brows down), so it starts high.
 const rangeFor = (n) => RANGE[Object.keys(RANGE).find((k) => n.startsWith(k))] ?? [0.05, 0.8];
 // One Euro settings [minCutoff Hz, beta]: blink and mouth react fast, the head is calmer.
-const FILTER = { eyeBlink: [4, 0.8], jawOpen: [3, 0.6], mouth: [2.5, 0.5], eyeLook: [2, 0.4], brow: [1.5, 0.3], head: [1.2, 0.25] };
+const FILTER = { eyeBlink: [4, 0.8], jawOpen: [3, 0.6], mouth: [2.5, 0.5], eyeLook: [2, 0.4], brow: [1.5, 0.3], head: [1.2, 0.25], pos: [1, 0.03] };
 const filterFor = (n) => FILTER[Object.keys(FILTER).find((k) => n.startsWith(k))] ?? [2, 0.4];
 
 class OneEuro {
@@ -42,7 +45,8 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const D2R = Math.PI / 180;
 
 // The constants in effect, written into every performance file (take.js) so a later retune knows what was used.
-export const MAPPING = { version: 1, LOST_MS, MAX_YAW, MAX_PITCH, MAX_ROLL, SPLIT, SPINE, RANGE, FILTER };
+// Version 2 (5): head position (pos, MAX_POS, FILTER.pos).
+export const MAPPING = { version: 2, LOST_MS, MAX_YAW, MAX_PITCH, MAX_ROLL, SPLIT, SPINE, MAX_POS, RANGE, FILTER };
 
 export class FaceRig {
   constructor(vrm) {
@@ -53,6 +57,9 @@ export class FaceRig {
     this.target = {};        // smoothed expression values
     this.head = { x: 0, y: 0, z: 0 };
     this.offset = { x: 0, y: 0, z: 0 }; // "כייל ראש"
+    this.pos = { x: 0, y: 0, z: 0 };    // head position from neutral, cm (mirrored like yaw: +x = the avatar's left)
+    this.offsetPos = null;              // neutral head position (raw cm); null = the next detection becomes neutral
+    this.rawPos = null;
     this.lastSeen = 0;
     this.raw = null;         // last raw head euler, for calibration
     this.shapes = null;      // last raw blendshapes
@@ -89,12 +96,21 @@ export class FaceRig {
       const y = clamp(s * (e.y - this.offset.y), -MAX_YAW * D2R, MAX_YAW * D2R);
       const z = clamp(s * (e.z - this.offset.z), -MAX_ROLL * D2R, MAX_ROLL * D2R);
       this.head = { x: this.f("head.x", x, t), y: this.f("head.y", y, t), z: this.f("head.z", z, t) };
+      const el = m.elements, rp = { x: el[12], y: el[13], z: el[14] };
+      this.rawPos = rp;
+      if (!this.offsetPos) this.offsetPos = { ...rp };
+      const o = this.offsetPos;
+      const px = clamp(s * (rp.x - o.x), -MAX_POS.x, MAX_POS.x);
+      const py = clamp(rp.y - o.y, -MAX_POS.y, MAX_POS.y);
+      const pz = clamp(rp.z - o.z, -MAX_POS.z, MAX_POS.z); // + = closer to the camera
+      this.pos = { x: this.f("pos.x", px, t), y: this.f("pos.y", py, t), z: this.f("pos.z", pz, t) };
     }
   }
 
   // "כייל": the current head angle becomes straight, and the current face becomes the resting face.
   calibrate() {
     if (this.raw) this.offset = { ...this.raw };
+    if (this.rawPos) this.offsetPos = { ...this.rawPos };
     if (this.shapes) this.base = { ...this.shapes };
   }
 
@@ -104,11 +120,14 @@ export class FaceRig {
     const filters = {};
     for (const [n, f] of this.filters) filters[n] = { x: f.x, dx: f.dx, t: f.t - t0 };
     return { mirror: this.mirror, offset: { ...this.offset }, base: { ...this.base }, target: { ...this.target },
-             head: { ...this.head }, lastSeen: this.lastSeen - t0, filters };
+             head: { ...this.head }, pos: { ...this.pos }, offsetPos: this.offsetPos && { ...this.offsetPos },
+             lastSeen: this.lastSeen - t0, filters };
   }
   restore(s) {
     this.mirror = s.mirror; this.offset = { ...s.offset }; this.base = { ...s.base }; this.target = { ...s.target };
     this.head = { ...s.head }; this.lastSeen = s.lastSeen;
+    // Takes before version 5 have no position: the first detection of the replay becomes neutral (as live would).
+    this.pos = { x: 0, y: 0, z: 0, ...s.pos }; this.offsetPos = s.offsetPos ? { ...s.offsetPos } : null;
     this.filters = new Map();
     for (const [n, v] of Object.entries(s.filters || {})) {
       const [mc, beta] = filterFor(n), fl = new OneEuro(mc, beta);
@@ -117,7 +136,10 @@ export class FaceRig {
     }
   }
   // Calibration from a recorded event (the values the live "כייל" stored).
-  setCalibration(offset, base) { this.offset = { ...offset }; this.base = { ...base }; }
+  setCalibration(offset, base, offsetPos) {
+    this.offset = { ...offset }; this.base = { ...base };
+    if (offsetPos) this.offsetPos = { ...offsetPos };
+  }
 
   // Every render frame: write the held values to the model (ease to neutral when the face is lost).
   apply(dt, t) {
@@ -129,10 +151,10 @@ export class FaceRig {
       this.target[n] = v;
       em.setValue(n, v);
     }
-    if (lost) for (const a of ["x", "y", "z"]) this.head[a] *= k;
+    if (lost) for (const a of ["x", "y", "z"]) { this.head[a] *= k; this.pos[a] *= k; }
     this.writeBones();
   }
-  // Head/neck/spine from this.head. Also used by the editor/offline render (take.js PoseTrack), which sets
+  // Head/neck/spine from this.head (body.js then overwrites the spine and adds to neck/head when its extras are on). Also used by the editor/offline render (take.js PoseTrack), which sets
   // this.target/this.head from the precomputed pose and writes the expressions itself.
   writeBones() {
     const { x, y, z } = this.head, { neck, head, spine } = this.bones;

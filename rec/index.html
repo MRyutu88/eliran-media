@@ -116,6 +116,28 @@
   .ed-swatches .sw { width: 34px; height: 34px; padding: 0; border-radius: 50%; border: 2px solid var(--line); }
   .ed-swatches .sw[aria-pressed="true"] { border-color: var(--hot); box-shadow: 0 0 0 2px var(--ink) inset; }
   #ed-add button { padding: 11px 6px; font-size: 15px; }
+  /* settings sheet (body.js extras): at the bottom, Eliran stays visible above it */
+  #settings { position: fixed; inset-inline: 0; bottom: 0; max-height: 52dvh; z-index: 7; background: rgba(22,16,28,.97);
+              border-top: 1px solid var(--line); border-radius: 16px 16px 0 0; display: flex; flex-direction: column;
+              padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); gap: 8px; }
+  .set-head { display: flex; align-items: center; gap: 6px; }
+  .set-head b { flex: 1; font-size: 15px; }
+  .set-head button { padding: 7px 11px; font-size: 14px; }
+  #set-close { background: var(--hot); color: var(--ink); font-weight: 700; }
+  #set-list { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  #set-list section { background: var(--card); border-radius: 12px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+  #set-list section.off .set-row, #set-list section.off .set-sw { opacity: .4; }
+  #set-list p { margin: 0; font-size: 12px; color: var(--dim); }
+  .set-top { display: flex; align-items: center; gap: 8px; }
+  .set-top b { flex: 1; font-size: 15px; }
+  .set-on { padding: 5px 12px; font-size: 13px; border: 1px solid var(--line); background: transparent; min-width: 58px; }
+  .set-on[aria-pressed="true"] { border-color: var(--ok); color: var(--ok); }
+  .set-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); }
+  .set-row span { min-width: 44px; }
+  .set-row input { flex: 1; accent-color: var(--hot); height: 28px; }
+  .set-row output { min-width: 40px; text-align: left; direction: ltr; color: var(--cream); font: 12px ui-monospace, Consolas, monospace; }
+  .set-sw { align-self: flex-start; padding: 5px 10px; font-size: 13px; border: 1px solid var(--line); background: transparent; }
+  .set-sw[aria-pressed="true"] { border-color: var(--hot); }
   /* render sheet */
   #render { position: fixed; inset: 0; background: rgba(10,7,14,.96); display: flex; flex-direction: column; gap: 12px; justify-content: center;
             padding: calc(16px + env(safe-area-inset-top)) 14px calc(16px + env(safe-area-inset-bottom)); z-index: 8; }
@@ -162,6 +184,7 @@
     <button id="f-close" aria-pressed="false">קרוב</button>
     <button id="mic-retry" hidden>🎤 לנסות מיקרופון שוב</button>
     <button id="calib">כייל (פנים רגילות)</button>
+    <button id="set-btn">⚙ הגדרות</button>
     <button id="takes-btn">🎞 הקלטות</button>
     <button id="swap">החלף מודל</button>
   </div>
@@ -176,6 +199,7 @@
     <button id="ed-undo" aria-label="בטל פעולה">↶</button>
     <button id="ed-zout" aria-label="הקטן ציר זמן">−</button>
     <button id="ed-zin" aria-label="הגדל ציר זמן">+</button>
+    <button id="ed-set" aria-label="הגדרות">⚙</button>
   </div>
   <div id="ed-tl">
     <div id="ed-content"></div>
@@ -200,6 +224,15 @@
     <button id="ed-close">✕ סגור</button>
     <button id="ed-render" class="main">🎬 רנדר לוידאו</button>
   </div>
+</div>
+
+<div id="settings" hidden>
+  <div class="set-head">
+    <b>⚙ הגדרות · התנועה של הגוף</b>
+    <button id="set-reset">↺ ברירת מחדל</button>
+    <button id="set-close">✓ סגור</button>
+  </div>
+  <div id="set-list"></div>
 </div>
 
 <div id="render" hidden>
@@ -236,7 +269,7 @@
 <!-- REC_VERSION: bump it here, in app.js and in every local import ("?v=") on each publish (docs/phone_recording.md,
      "Updates and the phone's cache"). GitHub Pages lets the phone cache each file for 10 minutes; mixed old/new files
      crashed the page on "טוען…" (25.11). -->
-<meta name="rec-version" content="4">
+<meta name="rec-version" content="5">
 <script>
   // Boot guard: if the page code fails to load or crashes before it starts, say so (with a fresh reload) instead of
   // "טוען…" forever.
@@ -259,6 +292,6 @@
     setTimeout(function () { fail("לקח יותר מדי זמן, אולי אין אינטרנט"); }, 40000);
   })();
 </script>
-<script type="module" src="app.js?v=4" onerror="__recBootFail('קובץ חסר')"></script>
+<script type="module" src="app.js?v=5" onerror="__recBootFail('קובץ חסר')"></script>
 </body>
 </html>

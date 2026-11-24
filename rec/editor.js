@@ -3,11 +3,12 @@
 // and the strips move under it: drag to scrub, tap a block to edit it below the strips, drag a selected block to move
 // it. The edit (edit.js) is saved with the take on every change; "רנדר" makes the video offline (render.js).
 // Text in Hebrew; values from the take are set with textContent.
-import { readTake, PoseTrack } from "./take.js?v=4";
-import { FaceRig } from "./mapping.js?v=4";
-import { BG } from "./avatar.js?v=4";
-import { newEdit, checkEdit, newId, sceneAt, applyScene, cameraAt, COLORS, EFFECTS, DIRS, SHOTS } from "./edit.js?v=4";
-import { renderTake, support, SIZES } from "./render.js?v=4";
+import { readTake, PoseTrack } from "./take.js?v=5";
+import { FaceRig } from "./mapping.js?v=5";
+import { BG } from "./avatar.js?v=5";
+import { newEdit, checkEdit, newId, sceneAt, applyScene, cameraAt, COLORS, EFFECTS, DIRS, SHOTS } from "./edit.js?v=5";
+import { renderTake, support, SIZES } from "./render.js?v=5";
+import { BodyRig } from "./body.js?v=5";
 
 const $ = (id) => document.getElementById(id);
 const fmtT = (ms) => {
@@ -19,12 +20,13 @@ const ROW = { camera: 0, effects: 1, bg: 2 };
 const RULER = 18, ROW_H = 34;
 const light = (hex) => { const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)); return r * 0.3 + g * 0.59 + b * 0.11 > 150; };
 
-// ctx: {stage, getAudio() -> AudioContext, putTake(rec), storeTake(rec), openResult(rec), say(text, bad), onClose()}
+// ctx: {stage, getAudio() -> AudioContext, putTake(rec), storeTake(rec), openResult(rec), say(text, bad),
+//       bodySettings (body.js, the current "⚙ הגדרות"), openSettings(), onClose()}
 export function createEditor(ctx) {
   const { stage } = ctx;
   const ui = {
     root: $("editor"), title: $("ed-title"), play: $("ed-play"), time: $("ed-time"), undo: $("ed-undo"),
-    zin: $("ed-zin"), zout: $("ed-zout"), tl: $("ed-tl"), content: $("ed-content"), add: $("ed-add"),
+    zin: $("ed-zin"), zout: $("ed-zout"), set: $("ed-set"), tl: $("ed-tl"), content: $("ed-content"), add: $("ed-add"),
     addCam: $("ed-add-cam"), addFx: $("ed-add-fx"), addBg: $("ed-add-bg"),
     sheet: $("ed-sheet"), shTitle: $("ed-sh-title"), shBody: $("ed-sh-body"), shHere: $("ed-sh-here"),
     shDel: $("ed-sh-del"), shOk: $("ed-sh-ok"), close: $("ed-close"), render: $("ed-render"),
@@ -44,7 +46,8 @@ export function createEditor(ctx) {
     try { edit = checkEdit(rec.edit) ? structuredClone(rec.edit) : newEdit(data); }
     catch { ctx.say("העריכה נשמרה בגרסה חדשה יותר של הדף. לרענן את הדף.", true); return; }
     const rig = new FaceRig(stage.vrm);
-    S = { rec, data, edit, pose: new PoseTrack(data, rig), dur: data.header.durationMs, tv: 0, k: 0.06,
+    const body = new BodyRig(stage.vrm, stage, ctx.bodySettings);
+    S = { rec, data, edit, pose: new PoseTrack(data, rig, body), dur: data.header.durationMs, tv: 0, k: 0.06,
           playing: false, sel: null, undo: [], buffer: null, src: null, rendering: false };
     if (data.audio) {
       try { const ac = ctx.getAudio(); await ac.resume(); S.buffer = await ac.decodeAudioData(await data.audio.arrayBuffer()); }
@@ -73,6 +76,9 @@ export function createEditor(ctx) {
     ctx.onClose();
   }
   ui.close.onclick = close;
+  ui.set.onclick = () => { if (S && !S.rendering) ctx.openSettings(); };
+  // "⚙ הגדרות" changed: the body track of the whole take is computed again (a few ms).
+  function bodyChanged() { if (S && !S.rendering) S.pose.setBody(ctx.bodySettings); }
 
   // ---- saving (debounced) and undo ------------------------------------------------------------------------------
   let saveTimer = null;
@@ -433,6 +439,6 @@ export function createEditor(ctx) {
     }
   };
 
-  const api = { open, close, tick, get active() { return !!S; }, get rendering() { return !!S?.rendering; }, get state() { return S; } };
+  const api = { open, close, tick, bodyChanged, get active() { return !!S; }, get rendering() { return !!S?.rendering; }, get state() { return S; } };
   return api;
 }

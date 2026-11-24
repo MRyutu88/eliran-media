@@ -11,7 +11,7 @@ export const BG = "#3b1830"; // a dark plum (brand --plum is #5B2140); recorded 
 
 // Arms come in the rest (T) pose; lower them to the sides. Normalized bones: the model faces +Z, its left arm is +X,
 // so rotating leftUpperArm about Z by a negative angle brings it down.
-const ARM_DOWN = 1.2, ELBOW = 0.2;
+export const ARM_DOWN = 1.2, ELBOW = 0.2; // body.js writes the arms every frame from these
 
 export function createStage(canvas) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
@@ -36,6 +36,8 @@ export function createStage(canvas) {
   // Measured once per model in the rest pose (load): the two framings as {y, dist, z} and the model's size, so the
   // editor's camera keys and effects (edit.js) do not depend on the current head pose.
   let shots = null, size = null;
+  // place() = the editor effect, setBody() = body.js (offset + squash); the model gets both combined.
+  let fx = null, body = { x: 0, y: 0, sx: 1, sy: 1 };
 
   async function load(arrayBuffer) {
     const loader = new GLTFLoader();
@@ -50,6 +52,7 @@ export function createStage(canvas) {
     if (vrm) { scene.remove(vrm.scene); VRMUtils.deepDispose(vrm.scene); }
     vrm = v;
     scene.add(vrm.scene);
+    fx = null; body = { x: 0, y: 0, sx: 1, sy: 1 };
     restPose();
     vrm.update(0);
     vrm.scene.updateMatrixWorld(true);
@@ -99,12 +102,15 @@ export function createStage(canvas) {
     camera.lookAt(c.x, c.y, c.z);
   }
   // Effects (edit.js): an offset/turn/scale on the whole model, and hidden when out of frame. All zero = as recorded.
-  function place(fx) {
+  function place(f) { fx = f; compose(); }
+  // body.js: {x, y (metres), sx, sy}, the squash pivot is the model's origin (the feet).
+  function setBody(b) { body = b; compose(); }
+  function compose() {
     if (!vrm) return;
-    const o = vrm.scene;
-    o.position.set(fx?.x ?? 0, fx?.y ?? 0, 0);
+    const o = vrm.scene, sx = (fx?.sx ?? 1) * body.sx;
+    o.position.set((fx?.x ?? 0) + body.x, (fx?.y ?? 0) + body.y, 0);
     o.rotation.set(0, fx?.rotY ?? 0, 0);
-    o.scale.set(fx?.sx ?? 1, fx?.sy ?? 1, fx?.sx ?? 1);
+    o.scale.set(sx, (fx?.sy ?? 1) * body.sy, sx);
     o.visible = !fx?.hidden;
   }
   function background(color) { scene.background.set(color); }
@@ -116,6 +122,6 @@ export function createStage(canvas) {
     renderer.render(scene, camera);
   }
 
-  return { renderer, scene, camera, load, frame, view, place, background, setSize, render,
+  return { renderer, scene, camera, load, frame, view, place, setBody, background, setSize, render,
            get vrm() { return vrm; }, get framing() { return framing; }, get shots() { return shots; }, get size() { return size; } };
 }

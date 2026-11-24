@@ -3,16 +3,17 @@
 // (play, share, save, delete) -> "נגן מחדש" drives Eliran from the file, and can record that to a new video ->
 // "ערוך" opens the timeline editor on the take (editor.js), which renders the edit offline to an MP4 (render.js).
 // Text in Hebrew; values from files are set with textContent.
-import { createStage } from "./avatar.js?v=4";
-import { createTracker } from "./tracking.js?v=4";
-import { FaceRig } from "./mapping.js?v=4";
-import { startRecording, pickType, frameDrawn } from "./recorder.js?v=4";
-import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=4";
-import { createEditor } from "./editor.js?v=4";
+import { createStage } from "./avatar.js?v=5";
+import { createTracker } from "./tracking.js?v=5";
+import { FaceRig } from "./mapping.js?v=5";
+import { startRecording, pickType, frameDrawn } from "./recorder.js?v=5";
+import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=5";
+import { createEditor } from "./editor.js?v=5";
+import { BodyRig, GROUPS, DEFAULTS, loadSettings, saveSettings } from "./body.js?v=5";
 
 // Must match <meta name="rec-version"> in index.html. A different value = the phone mixed cached files from two
 // versions: reload once with a fresh URL (index.html then comes fresh and asks for matching files).
-const REC_VERSION = "4";
+const REC_VERSION = "5";
 if (document.querySelector('meta[name="rec-version"]')?.content !== REC_VERSION) {
   const key = "rec-reload-" + REC_VERSION;
   if (!sessionStorage.getItem(key)) {
@@ -28,7 +29,8 @@ const ui = {
   view: $("view"), cam: $("cam"), status: $("status"), fps: $("fps"), dot: $("rec-dot"), hint: $("hint"),
   pick: $("pick"), input: $("pick-input"), start: $("start"), record: $("record"), chips: $("chips"),
   micRetry: $("mic-retry"), mirror: $("t-mirror"), showCam: $("t-cam"), fBody: $("f-body"), fClose: $("f-close"),
-  calib: $("calib"), swap: $("swap"), takesBtn: $("takes-btn"),
+  calib: $("calib"), swap: $("swap"), takesBtn: $("takes-btn"), setBtn: $("set-btn"),
+  set: $("settings"), setList: $("set-list"), setClose: $("set-close"), setReset: $("set-reset"),
   result: $("result"), playback: $("playback"), meta: $("meta"), share: $("share"), save: $("save"), savePerf: $("save-perf"),
   resultReplay: $("result-replay"), resultEdit: $("result-edit"), again: $("again"),
   takes: $("takes"), takesList: $("takes-list"), takesClose: $("takes-close"), takesNote: $("takes-note"),
@@ -78,10 +80,12 @@ const stage = createStage(ui.view);
 let rig = null, tracker = null, media = null, wake = null, busy = false, lastUrl = null, current = null, modelInfo = null;
 let take = null, liveRec = null; // the take being recorded: TakeWriter + recorder controller
 let rp = null;                   // replay state (startReplay)
+let body = null;                 // BodyRig (body.js) on the loaded model, for live and replay
+const bodySettings = loadSettings(); // "⚙ הגדרות"; changed in place, so every rig that holds it sees changes at once
 const stats = { frames: 0, dets: 0, detMs: 0, t: performance.now(), face: false };
 // For local tests. __rec.trace = [] collects {src, t, target, head} after every face update (live while recording,
 // and in replay), to compare the two.
-window.__rec = { stage, get rig() { return rig; }, get tracker() { return tracker; }, get replay() { return rp; }, stats, trace: null };
+window.__rec = { stage, get body() { return body; }, bodySettings, get rig() { return rig; }, get tracker() { return tracker; }, get replay() { return rp; }, stats, trace: null };
 const trace = (src, r, t) => window.__rec.trace?.push({ src, t, target: { ...r.target }, head: { ...r.head } });
 
 async function loadModel(blob, name) {
@@ -92,6 +96,7 @@ async function loadModel(blob, name) {
     const mirror = rig ? rig.mirror : true;
     rig = new FaceRig(vrm);
     rig.mirror = mirror;
+    body = new BodyRig(vrm, stage, bodySettings);
     modelInfo = { name: name || "VRM", bytes: blob.size, expressions: Object.keys(vrm.expressionManager.expressionMap), driven: rig.driven };
     ui.chips.hidden = false;
     if (media) { showMain(ui.record); say(""); } else { showMain(ui.start); say(""); }
@@ -220,7 +225,7 @@ ui.calib.onclick = () => {
   if (rp) return;
   if (!rig?.raw) { say("לא רואה פנים כרגע. הסתכל ישר למצלמה עם פנים רגילות ונסה שוב.", true); setTimeout(() => say(""), 2500); return; }
   rig.calibrate();
-  take?.event("calib", { offset: { ...rig.offset }, base: { ...rig.base } });
+  take?.event("calib", { offset: { ...rig.offset }, base: { ...rig.base }, offsetPos: rig.offsetPos && { ...rig.offsetPos } });
   say("כויל ✓ הפנים האלה הן עכשיו \"רגיל\""); setTimeout(() => say(""), 1500);
 };
 
@@ -228,7 +233,8 @@ ui.calib.onclick = () => {
 // Start/stop (stops by itself at MAX_MS). Each take = the regular video + a performance file, kept in IndexedDB.
 function takeInfo() {
   return {
-    settings: { mirror: rig.mirror, framing: stage.framing, calibration: { offset: { ...rig.offset }, base: { ...rig.base } } },
+    settings: { mirror: rig.mirror, framing: stage.framing, calibration: { offset: { ...rig.offset }, base: { ...rig.base }, offsetPos: rig.offsetPos && { ...rig.offsetPos } } },
+    body: JSON.parse(JSON.stringify(bodySettings)),
     model: modelInfo,
     tracker: { lib: "@mediapipe/tasks-vision@1.2.3", delegate: tracker?.delegate, video: { w: ui.cam.videoWidth, h: ui.cam.videoHeight } },
     stage: { w: ui.view.width, h: ui.view.height, fov: stage.camera.fov, framing: stage.framing },
@@ -243,7 +249,7 @@ const FSI = String.fromCharCode(0x2068), PDI = String.fromCharCode(0x2069);
 const isolate = (parts) => parts.filter(Boolean).map((x) => FSI + x + PDI).join(" · ");
 const niceDate = (at) => new Date(at).toLocaleString("he-IL", { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit" });
 function lockUi(on) {
-  for (const b of [ui.swap, ui.takesBtn, ui.micRetry]) b.disabled = on;
+  for (const b of [ui.swap, ui.takesBtn, ui.micRetry]) b.disabled = on; // "⚙ הגדרות" stays open: it is the look, not the take
 }
 
 ui.record.onclick = async () => {
@@ -408,6 +414,7 @@ async function startReplay(t) {
     } catch (e) { console.warn("replay audio", e); rp.buffer = null; }
   }
   window.__rec.replayHeader = data.header;
+  body?.reset();
   say("");
   show();
   ui.rpBar.hidden = false;
@@ -501,9 +508,67 @@ function stopReplay() {
 const editor = createEditor({
   stage,
   getAudio: () => (actx ??= new AudioContext()),
-  putTake, storeTake, openResult, say,
+  putTake, storeTake, openResult, say, bodySettings, openSettings,
   onClose: () => { if (media) keepAwake(); },
 });
+// ---- settings ("⚙ הגדרות": the body extras of body.js) ---------------------------------------------------------
+// A bottom sheet, so Eliran stays visible above it while tuning. Every change applies at once (live, replay, editor)
+// and is kept in localStorage. Not recorded in takes: replay/editor/render always use the current settings.
+let setTimer = null;
+function settingsChanged() {
+  saveSettings(bodySettings);
+  clearTimeout(setTimer);
+  setTimer = setTimeout(() => editor.bodyChanged(), 150); // the editor recomputes its body track
+}
+function buildSettings() {
+  ui.setList.replaceChildren();
+  for (const g of GROUPS) {
+    const st = bodySettings[g.key], box = document.createElement("section");
+    const top = document.createElement("div"); top.className = "set-top";
+    const name = document.createElement("b"); name.textContent = g.name;
+    const on = document.createElement("button"); on.className = "set-on";
+    const paint = () => {
+      on.setAttribute("aria-pressed", String(st.on)); on.textContent = st.on ? "פועל" : "כבוי";
+      box.classList.toggle("off", !st.on);
+    };
+    on.onclick = () => { st.on = !st.on; paint(); settingsChanged(); };
+    top.append(name, on);
+    const hint = document.createElement("p"); hint.textContent = g.hint;
+    box.append(top, hint);
+    for (const [key, label, min, max, stepV] of g.sliders) {
+      const row = document.createElement("label"); row.className = "set-row";
+      const l = document.createElement("span"); l.textContent = label;
+      const input = document.createElement("input");
+      Object.assign(input, { type: "range", min, max, step: stepV, value: st[key] });
+      input.dataset.key = `${g.key}.${key}`;
+      const val = document.createElement("output");
+      const show = () => { val.textContent = `${Math.round(st[key] * 100)}%`; };
+      input.oninput = () => { st[key] = Number(input.value); show(); settingsChanged(); };
+      show();
+      row.append(l, input, val);
+      box.append(row);
+    }
+    for (const [key, label] of g.switches || []) {
+      const b = document.createElement("button"); b.className = "set-sw";
+      const p2 = () => { b.setAttribute("aria-pressed", String(st[key])); b.textContent = (st[key] ? "✓ " : "") + label; };
+      b.onclick = () => { st[key] = !st[key]; p2(); settingsChanged(); };
+      p2();
+      box.append(b);
+    }
+    paint();
+    ui.setList.append(box);
+  }
+}
+function openSettings() { buildSettings(); ui.set.hidden = false; }
+ui.setBtn.onclick = openSettings;
+ui.setClose.onclick = () => { ui.set.hidden = true; };
+ui.setReset.onclick = () => {
+  const d = JSON.parse(JSON.stringify(DEFAULTS));
+  for (const k of Object.keys(d)) bodySettings[k] = d[k];
+  settingsChanged();
+  buildSettings();
+};
+
 function openEditor(t) {
   if (!stage.vrm || liveRec) return;
   stopReplay();
@@ -524,6 +589,7 @@ function loop(now) {
     rp.replay?.feed(rp.tv);
     if (rp.replay && rp.tv > rp.replay.durationMs) replayEnded();
     rp.rig.apply(dt, rp.tv);
+    if (body) { body.update(BodyRig.input(rp.rig), rp.tv); body.write(); }
   } else {
     if (tracker && rig) {
       const r = tracker.detect(ui.cam);
@@ -535,6 +601,7 @@ function loop(now) {
       }
     }
     rig?.apply(dt, now);
+    if (rig && body) { body.update(BodyRig.input(rig), now); body.write(); }
   }
   stage.render(dt);
   frameDrawn();

@@ -14,7 +14,9 @@
 //                                                   order], matrix[16] (MediaPipe facialTransformationMatrix, column-major)
 //       "render"   Float64[render.count]            render frame times, ms since t0 (one video frame each)
 //       "audio"    raw bytes of the mic recording (header.audio.type), when there was a mic
-import { MAPPING } from "./mapping.js?v=4";
+import { MAPPING } from "./mapping.js?v=5";
+import { STEP_MS, OUT_LEN } from "./body.js?v=5";
+const clampN = (v, a, b) => Math.min(b, Math.max(a, v));
 
 const MAGIC = "ELIRANPF", VERSION = 1;
 export const EXT = "eliperf";
@@ -67,6 +69,7 @@ export class TakeWriter {
       render: { count: render.length },
       start: this.start,                 // FaceRig.snapshot(t0): One Euro state, held values, head, calibration, mirror
       settings: this.info.settings,      // at the start: mirror, framing, calibration
+      body: this.info.body,              // body.js settings while recording (for reference: replay/render use the current ones)
       events: this.events,               // [{t, at, type: "mirror"|"calib"|"frame", ...}]
       mapping: MAPPING,
       model: this.info.model,
@@ -141,7 +144,7 @@ export function createReplay(take, rig, { onUpdate, onDet } = {}) {
       const it = items[i++];
       if (it.kind === "det") { rig.update(it.face, it.t); if (it.face) onUpdate?.(it.t); onDet?.(it.t, !!it.face); }
       else if (it.type === "mirror") rig.mirror = it.value;
-      else if (it.type === "calib") rig.setCalibration(it.offset, it.base);
+      else if (it.type === "calib") rig.setCalibration(it.offset, it.base, it.offsetPos);
     }
   }
   return { feed, durationMs: take.header.durationMs, get done() { return i >= items.length; } };
@@ -154,16 +157,21 @@ export function createReplay(take, rig, { onUpdate, onDet } = {}) {
 //   60 fps render of ~40 detections/s moves smoothly instead of in steps;
 // - a lost face eases to neutral like live (live multiplies by exp(-4 dt) every frame once LOST_MS passed since the
 //   last face; here the same curve is computed from the time: exp(-4 (t - lastSeen - LOST_MS))).
-const GAP_MS = 120;
+// - the body (body.js) is a spring simulation, so it is run once over the whole take on its fixed 1/60 s grid (from a
+//   settled start) and at(t) interpolates that grid: still stateless, and two renders give the same frames.
+//   setBody() reruns it when the settings change (90 s = 5400 steps).
+const GAP_MS = 120, SETTLE_STEPS = 120;
 export class PoseTrack {
-  constructor(take, rig) {
+  // body = a BodyRig (body.js) or null.
+  constructor(take, rig, body = null) {
     this.rig = rig;
     this.names = rig.driven;
     const n = this.names.length, rows = [];
     const keep = (t) => {
-      const v = new Float32Array(n + 3);
+      const v = new Float32Array(n + 6);
       this.names.forEach((k, i) => { v[i] = rig.target[k] ?? 0; });
       v[n] = rig.head.x; v[n + 1] = rig.head.y; v[n + 2] = rig.head.z;
+      v[n + 3] = rig.pos.x; v[n + 4] = rig.pos.y; v[n + 5] = rig.pos.z;
       rows.push({ t, seen: rig.lastSeen, v });
     };
     const replay = createReplay(take, rig, { onDet: (t) => keep(t) });
@@ -174,8 +182,32 @@ export class PoseTrack {
     this.seen = Float64Array.from(rows, (r) => r.seen);
     this.v = rows.map((r) => r.v);
     this.lostMs = take.header.mapping?.LOST_MS ?? 400;
-    this.out = new Float32Array(n + 3);
+    this.out = new Float32Array(n + 6);
+    this.durationMs = take.header.durationMs;
+    this.jaw = this.names.indexOf("jawOpen");
+    this.body = body;
+    this.buildBody();
   }
+  // The body over the whole take, one output vector per 1/60 s step (grid[i] = time i * STEP_MS).
+  buildBody() {
+    const b = this.body;
+    this.grid = null;
+    if (!b) return;
+    b.reset();
+    const n = this.names.length, o = this.out;
+    const inp = () => ({ hx: o[n], hy: o[n + 1], hz: o[n + 2], px: o[n + 3], py: o[n + 4], pz: o[n + 5], jaw: this.jaw >= 0 ? o[this.jaw] : 0 });
+    this.sample(0);
+    for (let i = SETTLE_STEPS; i > 0; i--) b.step(inp(), -i * STEP_MS);
+    const steps = Math.ceil(Math.max(0, this.durationMs) / STEP_MS) + 2;
+    this.grid = new Float32Array(steps * OUT_LEN);
+    for (let i = 0; i < steps; i++) {
+      this.sample(i * STEP_MS);
+      b.step(inp(), i * STEP_MS);
+      this.grid.set(b.out, i * OUT_LEN);
+    }
+    this.bodyOut = new Float32Array(OUT_LEN);
+  }
+  setBody(settings) { if (this.body) { this.body.settings = settings; this.buildBody(); } }
   // Index of the last row with t <= time (0 if none).
   find(time) {
     let lo = 0, hi = this.t.length - 1;
@@ -183,9 +215,25 @@ export class PoseTrack {
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (this.t[mid] <= time) lo = mid; else hi = mid - 1; }
     return lo;
   }
-  // Sets the rig's target/head to the pose at time t (ms since t0) and writes it to the model.
+  // Sets the rig's target/head to the pose at time t (ms since t0) and writes it (and the body) to the model.
   at(time) {
-    const i = this.find(time), a = this.v[i], out = this.out, n = this.names.length;
+    this.sample(time);
+    const out = this.out, n = this.names.length;
+    const rig = this.rig, em = rig.vrm.expressionManager;
+    this.names.forEach((name, c) => { rig.target[name] = out[c]; em.setValue(name, out[c]); });
+    rig.head = { x: out[n], y: out[n + 1], z: out[n + 2] };
+    rig.pos = { x: out[n + 3], y: out[n + 4], z: out[n + 5] };
+    rig.writeBones();
+    if (this.grid) {
+      const steps = this.grid.length / OUT_LEN, f = clampN(time / STEP_MS, 0, steps - 1), i = Math.min(steps - 2, Math.floor(f)), w = f - i;
+      const g = this.grid, bo = this.bodyOut, a = i * OUT_LEN, c = a + OUT_LEN;
+      for (let k = 0; k < OUT_LEN; k++) bo[k] = g[a + k] + (g[c + k] - g[a + k]) * w;
+      this.body.write(bo);
+    }
+  }
+  // The pose at time t into this.out (no writing).
+  sample(time) {
+    const i = this.find(time), a = this.v[i], out = this.out;
     const lost = time - this.seen[i] - this.lostMs;
     const k = lost > 0 ? Math.exp(-4 * lost / 1000) : 1;
     const j = i + 1;
@@ -194,9 +242,5 @@ export class PoseTrack {
       const f = (time - this.t[i]) / (this.t[j] - this.t[i]), b = this.v[j];
       for (let c = 0; c < out.length; c++) out[c] = a[c] * k + (b[c] - a[c] * k) * f;
     } else for (let c = 0; c < out.length; c++) out[c] = a[c] * k;
-    const rig = this.rig, em = rig.vrm.expressionManager;
-    this.names.forEach((name, c) => { rig.target[name] = out[c]; em.setValue(name, out[c]); });
-    rig.head = { x: out[n], y: out[n + 1], z: out[n + 2] };
-    rig.writeBones();
   }
 }

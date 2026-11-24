@@ -15,7 +15,7 @@
 //     bg0:     "#rrggbb"                       the background before the first change
 //     bg:      [{id, t, color, fade}]         from t the background turns to color over `fade` ms (0 = cut) }
 // A new optional field = same version; a changed meaning = version 2 (readers refuse newer versions).
-import { BG } from "./avatar.js?v=4";
+import { BG } from "./avatar.js?v=5";
 
 export const EDIT_VERSION = 1;
 
