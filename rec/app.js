@@ -3,7 +3,7 @@
 import { createStage } from "./avatar.js";
 import { createTracker } from "./tracking.js";
 import { FaceRig } from "./mapping.js";
-import { record, pickType } from "./recorder.js";
+import { record, pickType, frameDrawn } from "./recorder.js";
 
 const SECONDS = 10;
 const $ = (id) => document.getElementById(id);
@@ -235,6 +235,7 @@ function loop(now) {
   }
   rig?.apply(dt, now);
   stage.render(dt);
+  frameDrawn();
   stats.frames++;
   if (now - stats.t >= 1000) {
     const sec = (now - stats.t) / 1000, fps = stats.frames / sec, tps = stats.dets / sec;
