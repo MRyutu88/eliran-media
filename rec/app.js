@@ -1,16 +1,18 @@
 // The recording page flow (docs/phone_recording.md): pick VRM (once, kept in IndexedDB) -> camera + mic ->
 // live tracking -> record a take (start/stop, up to MAX_MS) = the video + a performance file (take.js) -> takes list
-// (play, share, save, delete) -> "נגן מחדש" drives Eliran from the file, and can record that to a new video.
+// (play, share, save, delete) -> "נגן מחדש" drives Eliran from the file, and can record that to a new video ->
+// "ערוך" opens the timeline editor on the take (editor.js), which renders the edit offline to an MP4 (render.js).
 // Text in Hebrew; values from files are set with textContent.
-import { createStage } from "./avatar.js?v=3";
-import { createTracker } from "./tracking.js?v=3";
-import { FaceRig } from "./mapping.js?v=3";
-import { startRecording, pickType, frameDrawn } from "./recorder.js?v=3";
-import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=3";
+import { createStage } from "./avatar.js?v=4";
+import { createTracker } from "./tracking.js?v=4";
+import { FaceRig } from "./mapping.js?v=4";
+import { startRecording, pickType, frameDrawn } from "./recorder.js?v=4";
+import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=4";
+import { createEditor } from "./editor.js?v=4";
 
 // Must match <meta name="rec-version"> in index.html. A different value = the phone mixed cached files from two
 // versions: reload once with a fresh URL (index.html then comes fresh and asks for matching files).
-const REC_VERSION = "3";
+const REC_VERSION = "4";
 if (document.querySelector('meta[name="rec-version"]')?.content !== REC_VERSION) {
   const key = "rec-reload-" + REC_VERSION;
   if (!sessionStorage.getItem(key)) {
@@ -28,7 +30,7 @@ const ui = {
   micRetry: $("mic-retry"), mirror: $("t-mirror"), showCam: $("t-cam"), fBody: $("f-body"), fClose: $("f-close"),
   calib: $("calib"), swap: $("swap"), takesBtn: $("takes-btn"),
   result: $("result"), playback: $("playback"), meta: $("meta"), share: $("share"), save: $("save"), savePerf: $("save-perf"),
-  resultReplay: $("result-replay"), again: $("again"),
+  resultReplay: $("result-replay"), resultEdit: $("result-edit"), again: $("again"),
   takes: $("takes"), takesList: $("takes-list"), takesClose: $("takes-close"), takesNote: $("takes-note"),
   rpBar: $("replay-bar"), rpTitle: $("rp-title"), rpAgain: $("rp-again"), rpRec: $("rp-rec"), rpStop: $("rp-stop"),
 };
@@ -43,7 +45,8 @@ let shown = []; // the main button for the live flow, restored when a replay clo
 function showMain(...els) { shown = els; if (!rp) show(...els); }
 
 // ---- the model file, kept on this phone only -------------------------------------------------------------
-// Version 2 (25.11) adds "takes": {id, name, base, at, ms, kind: "live"|"replay", from?, video, videoType, perf, dets, audio}.
+// Version 2 (25.11) adds "takes": {id, name, base, at, ms, kind: "live"|"replay"|"render", from?, video, videoType, perf,
+// dets, audio, edit? (edit.js, saved by the editor), render? ({w, h, fps, ss, codec, audio, secs} of a rendered take)}.
 const DB = "eliran-rec", STORE = "files", TAKES = "takes";
 function idb(mode, fn, store = STORE) {
   return new Promise((resolve, reject) => {
@@ -338,6 +341,7 @@ function openResult(t) {
 ui.share.onclick = () => current && shareTake(current);
 ui.savePerf.onclick = () => current && savePerf(current);
 ui.resultReplay.onclick = () => { if (current) { closeResult(); startReplay(current); } };
+ui.resultEdit.onclick = () => { if (current) { closeResult(); openEditor(current); } };
 function closeResult() { ui.playback.pause(); ui.result.hidden = true; }
 ui.again.onclick = closeResult;
 
@@ -358,11 +362,13 @@ async function renderTakes() {
     const li = document.createElement("li"), head = document.createElement("div"), name = document.createElement("b");
     const meta = document.createElement("span"), row = document.createElement("div");
     name.textContent = t.name;
-    meta.textContent = isolate([niceDate(t.at), fmt(t.ms), t.audio ? "" : "בלי קול"]);
+    meta.textContent = isolate([niceDate(t.at), fmt(t.ms), t.audio ? "" : "בלי קול",
+      t.kind === "render" && t.render ? `ערוך ${t.render.h}p${t.render.fps}` : t.edit ? "יש עריכה" : ""]);
     head.append(name, meta);
     row.className = "chips";
     row.append(
       btn("▶ צפה", () => { ui.takes.hidden = true; openResult(t); }),
+      btn("✂ ערוך", () => { ui.takes.hidden = true; openEditor(t); }),
       btn("↻ נגן מחדש", () => { ui.takes.hidden = true; startReplay(t); }),
       btn("שתף", () => shareTake(t)),
       btn("שמור וידאו", () => download(t.video, videoFile(t).name)),
@@ -491,12 +497,28 @@ function stopReplay() {
   show(...shown);
 }
 
+// ---- editor ("ערוך": timeline on a take, offline render; editor.js) -------------------------------------------------
+const editor = createEditor({
+  stage,
+  getAudio: () => (actx ??= new AudioContext()),
+  putTake, storeTake, openResult, say,
+  onClose: () => { if (media) keepAwake(); },
+});
+function openEditor(t) {
+  if (!stage.vrm || liveRec) return;
+  stopReplay();
+  editor.open(t);
+}
+
 // ---- the loop -----------------------------------------------------------------------------------------------
 let prev = performance.now();
 function loop(now) {
   const dt = Math.min(0.1, (now - prev) / 1000);
   prev = now;
-  if (rp) {
+  if (editor.rendering) { requestAnimationFrame(loop); return; } // the offline render owns the stage
+  if (editor.active) {
+    editor.tick();
+  } else if (rp) {
     // Replay: the file drives the rig; the camera is not read.
     rp.tv = rp.p0 == null ? -1e9 : now - rp.p0;
     rp.replay?.feed(rp.tv);
@@ -523,7 +545,7 @@ function loop(now) {
     const ms = stats.dets ? stats.detMs / stats.dets : 0;
     const cls = (v) => (v >= 24 ? "" : v >= 15 ? "warn" : "bad");
     ui.fps.innerHTML = `<span class="${cls(fps)}">render <b>${fps.toFixed(0)}</b></span> · ` +
-      (rp ? "replay" : tracker ? `<span class="${cls(tps)}">face <b>${tps.toFixed(0)}</b></span> · ${ms.toFixed(0)}ms ${tracker.delegate}` +
+      (editor.active ? "editor" : rp ? "replay" : tracker ? `<span class="${cls(tps)}">face <b>${tps.toFixed(0)}</b></span> · ${ms.toFixed(0)}ms ${tracker.delegate}` +
         (stats.face ? "" : ` · <span class="warn">no face</span>`) : "tracking off");
     window.__rec.fps = { render: fps, face: tps, ms };
     stats.frames = stats.dets = stats.detMs = 0; stats.t = now;

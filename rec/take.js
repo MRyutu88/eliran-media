@@ -14,7 +14,7 @@
 //                                                   order], matrix[16] (MediaPipe facialTransformationMatrix, column-major)
 //       "render"   Float64[render.count]            render frame times, ms since t0 (one video frame each)
 //       "audio"    raw bytes of the mic recording (header.audio.type), when there was a mic
-import { MAPPING } from "./mapping.js?v=3";
+import { MAPPING } from "./mapping.js?v=4";
 
 const MAGIC = "ELIRANPF", VERSION = 1;
 export const EXT = "eliperf";
@@ -129,7 +129,7 @@ export async function readTake(src) {
 // Drives a FaceRig from a take with the same calls as live: restore the start state, then rig.update(face, t) for each
 // detection at its recorded time and the recorded setting changes in order. feed(tv) applies everything up to tv
 // (ms since t0). Framing events are not applied: in replay the framing is the user's choice ("קרוב"/"מלא").
-export function createReplay(take, rig, { onUpdate } = {}) {
+export function createReplay(take, rig, { onUpdate, onDet } = {}) {
   rig.restore(take.header.start);
   const items = [
     ...take.header.events.filter((e) => e.type !== "frame").map((e) => ({ ...e, kind: "event" })),
@@ -139,10 +139,64 @@ export function createReplay(take, rig, { onUpdate } = {}) {
   function feed(tv) {
     while (i < items.length && items[i].t <= tv) {
       const it = items[i++];
-      if (it.kind === "det") { rig.update(it.face, it.t); if (it.face) onUpdate?.(it.t); }
+      if (it.kind === "det") { rig.update(it.face, it.t); if (it.face) onUpdate?.(it.t); onDet?.(it.t, !!it.face); }
       else if (it.type === "mirror") rig.mirror = it.value;
       else if (it.type === "calib") rig.setCalibration(it.offset, it.base);
     }
   }
   return { feed, durationMs: take.header.durationMs, get done() { return i >= items.length; } };
+}
+
+// The whole performance computed once, for the editor and the offline render (editor.js, render.js): the take is fed
+// through createReplay (the same mapping as live and replay) and the rig's values are kept after every detection.
+// at(t) then gives the pose at any time, in any order (scrubbing), with no per-frame state:
+// - between two detections (both with a face, at most GAP_MS apart) the values are interpolated linearly, so a
+//   60 fps render of ~40 detections/s moves smoothly instead of in steps;
+// - a lost face eases to neutral like live (live multiplies by exp(-4 dt) every frame once LOST_MS passed since the
+//   last face; here the same curve is computed from the time: exp(-4 (t - lastSeen - LOST_MS))).
+const GAP_MS = 120;
+export class PoseTrack {
+  constructor(take, rig) {
+    this.rig = rig;
+    this.names = rig.driven;
+    const n = this.names.length, rows = [];
+    const keep = (t) => {
+      const v = new Float32Array(n + 3);
+      this.names.forEach((k, i) => { v[i] = rig.target[k] ?? 0; });
+      v[n] = rig.head.x; v[n + 1] = rig.head.y; v[n + 2] = rig.head.z;
+      rows.push({ t, seen: rig.lastSeen, v });
+    };
+    const replay = createReplay(take, rig, { onDet: (t) => keep(t) });
+    keep(Math.min(0, take.frames[0]?.t ?? 0) - 1); // the start state (before the first detection)
+    replay.feed(Infinity);
+    rows.sort((a, b) => a.t - b.t);
+    this.t = Float64Array.from(rows, (r) => r.t);
+    this.seen = Float64Array.from(rows, (r) => r.seen);
+    this.v = rows.map((r) => r.v);
+    this.lostMs = take.header.mapping?.LOST_MS ?? 400;
+    this.out = new Float32Array(n + 3);
+  }
+  // Index of the last row with t <= time (0 if none).
+  find(time) {
+    let lo = 0, hi = this.t.length - 1;
+    if (time <= this.t[0]) return 0;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (this.t[mid] <= time) lo = mid; else hi = mid - 1; }
+    return lo;
+  }
+  // Sets the rig's target/head to the pose at time t (ms since t0) and writes it to the model.
+  at(time) {
+    const i = this.find(time), a = this.v[i], out = this.out, n = this.names.length;
+    const lost = time - this.seen[i] - this.lostMs;
+    const k = lost > 0 ? Math.exp(-4 * lost / 1000) : 1;
+    const j = i + 1;
+    const blend = j < this.t.length && this.seen[j] === this.t[j] && this.t[j] - this.t[i] <= GAP_MS && time > this.t[i];
+    if (blend) {
+      const f = (time - this.t[i]) / (this.t[j] - this.t[i]), b = this.v[j];
+      for (let c = 0; c < out.length; c++) out[c] = a[c] * k + (b[c] - a[c] * k) * f;
+    } else for (let c = 0; c < out.length; c++) out[c] = a[c] * k;
+    const rig = this.rig, em = rig.vrm.expressionManager;
+    this.names.forEach((name, c) => { rig.target[name] = out[c]; em.setValue(name, out[c]); });
+    rig.head = { x: out[n], y: out[n + 1], z: out[n + 2] };
+    rig.writeBones();
+  }
 }

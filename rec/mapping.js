@@ -130,6 +130,11 @@ export class FaceRig {
       em.setValue(n, v);
     }
     if (lost) for (const a of ["x", "y", "z"]) this.head[a] *= k;
+    this.writeBones();
+  }
+  // Head/neck/spine from this.head. Also used by the editor/offline render (take.js PoseTrack), which sets
+  // this.target/this.head from the precomputed pose and writes the expressions itself.
+  writeBones() {
     const { x, y, z } = this.head, { neck, head, spine } = this.bones;
     neck?.rotation.set(x * SPLIT.neck, y * SPLIT.neck, z * SPLIT.neck, "YXZ");
     head?.rotation.set(x * SPLIT.head, y * SPLIT.head, z * SPLIT.head, "YXZ");

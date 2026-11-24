@@ -7,7 +7,7 @@ import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
 export const W = 720, H = 1280;
-const BG = "#3b1830"; // a dark plum (brand --plum is #5B2140); recorded as the clip's background
+export const BG = "#3b1830"; // a dark plum (brand --plum is #5B2140); recorded as the clip's background
 
 // Arms come in the rest (T) pose; lower them to the sides. Normalized bones: the model faces +Z, its left arm is +X,
 // so rotating leftUpperArm about Z by a negative angle brings it down.
@@ -33,6 +33,9 @@ export function createStage(canvas) {
   camera.position.set(0, 0.5, 2);
 
   let vrm = null, framing = "body";
+  // Measured once per model in the rest pose (load): the two framings as {y, dist, z} and the model's size, so the
+  // editor's camera keys and effects (edit.js) do not depend on the current head pose.
+  let shots = null, size = null;
 
   async function load(arrayBuffer) {
     const loader = new GLTFLoader();
@@ -49,6 +52,10 @@ export function createStage(canvas) {
     scene.add(vrm.scene);
     restPose();
     vrm.update(0);
+    vrm.scene.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(vrm.scene);
+    size = { w: box.max.x - box.min.x, h: box.max.y - box.min.y, top: box.max.y, bottom: box.min.y };
+    shots = { body: shot("body"), close: shot("close") };
     frame();
     return vrm;
   }
@@ -62,9 +69,7 @@ export function createStage(canvas) {
   // body (default) = the whole chibi, as large as the head's width allows: in 9:16 the head is almost as wide as the
   // frame, so keeping it whole already shows the whole body. close = head and chest filling the frame; the brim tip
   // and the ear go past the edges.
-  function frame(mode = framing) {
-    framing = mode;
-    if (!vrm) return;
+  function shot(mode) {
     vrm.scene.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(vrm.scene);
     const pos = (n) => vrm.humanoid.getNormalizedBoneNode(n)?.getWorldPosition(new THREE.Vector3());
@@ -81,15 +86,36 @@ export function createStage(canvas) {
       dist = Math.max(halfW / tanH, ((top - bottom) / 2) / tanV) * 1.04;
       camY = Math.min((top + bottom) / 2, top + 0.02 - dist * tanV * 0.95); // head near the top
     }
-    const z = pos("head")?.z ?? 0;
-    camera.position.set(0, camY, z + dist);
-    camera.lookAt(0, camY, z);
+    return { x: 0, y: camY, dist, z: pos("head")?.z ?? 0 };
   }
+  function frame(mode = framing) {
+    framing = mode;
+    if (!vrm) return;
+    view(shot(mode));
+  }
+  // The camera at {x, y, dist, z}: looking straight along -Z at (x, y, z) from dist away.
+  function view(c) {
+    camera.position.set(c.x, c.y, c.z + c.dist);
+    camera.lookAt(c.x, c.y, c.z);
+  }
+  // Effects (edit.js): an offset/turn/scale on the whole model, and hidden when out of frame. All zero = as recorded.
+  function place(fx) {
+    if (!vrm) return;
+    const o = vrm.scene;
+    o.position.set(fx?.x ?? 0, fx?.y ?? 0, 0);
+    o.rotation.set(0, fx?.rotY ?? 0, 0);
+    o.scale.set(fx?.sx ?? 1, fx?.sy ?? 1, fx?.sx ?? 1);
+    o.visible = !fx?.hidden;
+  }
+  function background(color) { scene.background.set(color); }
+  // Internal canvas size (the offline render uses 1080x1920 or 2x supersampling); always 9:16.
+  function setSize(w, h) { renderer.setSize(w, h, false); }
 
   function render(dt) {
     if (vrm) vrm.update(dt);
     renderer.render(scene, camera);
   }
 
-  return { renderer, scene, camera, load, frame, render, get vrm() { return vrm; }, get framing() { return framing; } };
+  return { renderer, scene, camera, load, frame, view, place, background, setSize, render,
+           get vrm() { return vrm; }, get framing() { return framing; }, get shots() { return shots; }, get size() { return size; } };
 }

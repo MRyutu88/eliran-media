@@ -11,13 +11,15 @@
      The VRM is picked from the phone and kept in this browser's IndexedDB; it is never uploaded anywhere.
      three.js + three-vrm render the model, MediaPipe Face Landmarker tracks the front camera, MediaRecorder records
      the canvas + the microphone, and each take also keeps a performance file (take.js) that "נגן מחדש" replays.
+     "ערוך" opens a timeline editor on a take (editor.js) and renders it offline to MP4 (WebCodecs + mp4-muxer).
      Versions are pinned; bump them together and re-test. -->
 <script type="importmap">
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/",
   "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js",
-  "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs"
+  "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs",
+  "mp4-muxer": "https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.mjs"
 } }
 </script>
 <style>
@@ -76,6 +78,53 @@
   /* replay bar */
   #replay-bar { display: flex; flex-direction: column; gap: 8px; }
   #rp-title { margin: 0; text-align: center; font-weight: 600; }
+  /* editor (editor.js): Eliran on top, three strips, the panel of the selected block */
+  body.editing .controls, body.editing #cam, body.editing #status:empty { display: none; }
+  #editor { padding: 6px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+  .ed-bar { display: flex; align-items: center; gap: 6px; }
+  .ed-bar button { padding: 8px 12px; font-size: 15px; }
+  #ed-play { background: var(--hot); color: var(--ink); font-weight: 700; min-width: 52px; }
+  #ed-time { direction: ltr; font: 13px ui-monospace, Consolas, monospace; color: var(--dim); }
+  #ed-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  #ed-tl { position: relative; height: 122px; overflow: hidden; background: #110c16; border-radius: 10px; touch-action: none;
+           user-select: none; -webkit-user-select: none; }
+  #ed-content { position: absolute; top: 0; bottom: 0; right: 50%; will-change: transform; z-index: 1; }
+  .ed-ruler { position: absolute; top: 0; height: 18px; left: 0; right: 0; }
+  .ed-ruler span { position: absolute; top: 0; height: 18px; border-right: 1px solid var(--line); padding-right: 3px;
+                   font: 10px/18px ui-monospace, Consolas, monospace; color: var(--dim); direction: ltr; }
+  .ed-ruler span.half { height: 6px; }
+  .ed-row { position: absolute; left: 0; right: 0; height: 32px; background: rgba(58,44,69,.45); border-radius: 6px; }
+  .it { position: absolute; top: 3px; bottom: 3px; border-radius: 6px; font-size: 12px; line-height: 26px; padding: 0 6px;
+        overflow: hidden; white-space: nowrap; color: var(--ink); font-weight: 600; box-shadow: inset 0 0 0 1px rgba(0,0,0,.25); }
+  .it.sel { outline: 2px solid var(--hot); outline-offset: 1px; z-index: 2; }
+  /* the strip names sit under the blocks (shown where a strip is empty) */
+  .ed-names { position: absolute; top: 18px; right: 6px; pointer-events: none; display: flex; flex-direction: column; z-index: 0; }
+  .ed-names span { height: 34px; line-height: 32px; font-size: 10px; color: var(--dim); }
+  #ed-head { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; margin-left: -1px; background: var(--raspberry); pointer-events: none; z-index: 3; }
+  #ed-sheet { background: var(--card); border-radius: 12px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;
+              max-height: 34vh; overflow-y: auto; }
+  .ed-sh-top { display: flex; align-items: center; gap: 6px; }
+  .ed-sh-top b { flex: 1; }
+  .ed-sh-top button { padding: 6px 10px; font-size: 14px; background: transparent; border: 1px solid var(--line); }
+  .ed-field { display: flex; align-items: center; gap: 8px; }
+  .ed-field .chips { justify-content: flex-start; flex: 1; }
+  .ed-field .chips button { padding: 6px 10px; }
+  .ed-lbl2 { font-size: 13px; color: var(--dim); min-width: 62px; }
+  .ed-ends { display: flex; align-items: center; gap: 6px; flex: 1; font-size: 12px; color: var(--dim); direction: ltr; }
+  .ed-ends input { flex: 1; accent-color: var(--hot); }
+  .ed-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ed-swatches .sw { width: 34px; height: 34px; padding: 0; border-radius: 50%; border: 2px solid var(--line); }
+  .ed-swatches .sw[aria-pressed="true"] { border-color: var(--hot); box-shadow: 0 0 0 2px var(--ink) inset; }
+  #ed-add button { padding: 11px 6px; font-size: 15px; }
+  /* render sheet */
+  #render { position: fixed; inset: 0; background: rgba(10,7,14,.96); display: flex; flex-direction: column; gap: 12px; justify-content: center;
+            padding: calc(16px + env(safe-area-inset-top)) 14px calc(16px + env(safe-area-inset-bottom)); z-index: 8; }
+  #render h2 { margin: 0; font-size: 18px; text-align: center; }
+  #r-opts { display: flex; flex-direction: column; gap: 10px; }
+  #r-note { color: var(--dim); font-size: 14px; margin: 0; }
+  #r-bar { background: var(--card); border-radius: 999px; height: 14px; overflow: hidden; }
+  #r-fill { background: var(--hot); height: 100%; width: 0; transition: width .2s; }
+  #r-text { text-align: center; font-size: 14px; direction: rtl; min-height: 1.4em; margin: 0; }
 </style>
 </head>
 <body>
@@ -119,6 +168,50 @@
   <p id="hint" class="hint" hidden></p>
 </div>
 
+<div id="editor" hidden>
+  <div class="ed-bar">
+    <button id="ed-play" aria-label="נגן">▶</button>
+    <span id="ed-time">0:00.0</span>
+    <span id="ed-title"></span>
+    <button id="ed-undo" aria-label="בטל פעולה">↶</button>
+    <button id="ed-zout" aria-label="הקטן ציר זמן">−</button>
+    <button id="ed-zin" aria-label="הגדל ציר זמן">+</button>
+  </div>
+  <div id="ed-tl">
+    <div id="ed-content"></div>
+    <div class="ed-names"><span>מצלמה</span><span>אפקטים</span><span>רקע</span></div>
+    <div id="ed-head"></div>
+  </div>
+  <div id="ed-add" class="row">
+    <button id="ed-add-cam">+ מצלמה</button>
+    <button id="ed-add-fx">+ אפקט</button>
+    <button id="ed-add-bg">+ רקע</button>
+  </div>
+  <div id="ed-sheet" hidden>
+    <div class="ed-sh-top">
+      <b id="ed-sh-title"></b>
+      <button id="ed-sh-here">⇥ לסמן</button>
+      <button id="ed-sh-del" class="danger">🗑</button>
+      <button id="ed-sh-ok">✓</button>
+    </div>
+    <div id="ed-sh-body"></div>
+  </div>
+  <div class="row">
+    <button id="ed-close">✕ סגור</button>
+    <button id="ed-render" class="main">🎬 רנדר לוידאו</button>
+  </div>
+</div>
+
+<div id="render" hidden>
+  <h2>🎬 רנדר לוידאו</h2>
+  <div id="r-opts"></div>
+  <p id="r-note"></p>
+  <div id="r-bar" hidden><div id="r-fill"></div></div>
+  <p id="r-text"></p>
+  <button id="r-go" class="main">התחל רנדר</button>
+  <button id="r-cancel">סגור</button>
+</div>
+
 <div id="result" hidden>
   <video id="playback" controls playsinline></video>
   <div class="meta" id="meta"></div>
@@ -127,6 +220,7 @@
     <a id="save" class="btn" download>שמור וידאו</a>
   </div>
   <div class="row">
+    <button id="result-edit">✂ ערוך</button>
     <button id="result-replay">↻ נגן מחדש</button>
     <button id="save-perf">שמור קובץ ביצוע</button>
   </div>
@@ -142,7 +236,7 @@
 <!-- REC_VERSION: bump it here, in app.js and in every local import ("?v=") on each publish (docs/phone_recording.md,
      "Updates and the phone's cache"). GitHub Pages lets the phone cache each file for 10 minutes; mixed old/new files
      crashed the page on "טוען…" (25.11). -->
-<meta name="rec-version" content="3">
+<meta name="rec-version" content="4">
 <script>
   // Boot guard: if the page code fails to load or crashes before it starts, say so (with a fresh reload) instead of
   // "טוען…" forever.
@@ -165,6 +259,6 @@
     setTimeout(function () { fail("לקח יותר מדי זמן, אולי אין אינטרנט"); }, 40000);
   })();
 </script>
-<script type="module" src="app.js?v=3" onerror="__recBootFail('קובץ חסר')"></script>
+<script type="module" src="app.js?v=4" onerror="__recBootFail('קובץ חסר')"></script>
 </body>
 </html>
