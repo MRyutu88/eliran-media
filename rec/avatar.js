@@ -14,7 +14,9 @@ export const BG = "#3b1830"; // a dark plum (brand --plum is #5B2140); recorded 
 export const ARM_DOWN = 1.2, ELBOW = 0.2; // body.js writes the arms every frame from these
 
 export function createStage(canvas) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
+  // alpha: the editor and the render clear to transparent and draw the background as a 2D layer (layers.js); live,
+  // the scene background is an opaque color, so the canvas stays opaque.
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "high-performance" });
   renderer.setPixelRatio(1);
   renderer.setSize(W, H, false);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -113,7 +115,8 @@ export function createStage(canvas) {
     o.scale.set(sx, (fx?.sy ?? 1) * body.sy, sx);
     o.visible = !fx?.hidden;
   }
-  function background(color) { scene.background.set(color); }
+  // a color, or null = transparent (the editor / render layers)
+  function background(color) { scene.background = color ? new THREE.Color(color) : null; }
   // Internal canvas size (the offline render uses 1080x1920 or 2x supersampling); always 9:16.
   function setSize(w, h) { renderer.setSize(w, h, false); }
 

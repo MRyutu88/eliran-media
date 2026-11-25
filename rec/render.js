@@ -2,10 +2,12 @@
 // from the performance file (take.js PoseTrack, interpolated), camera/effects/background from the edit (edit.js), one
 // WebGL render per frame, H.264 through WebCodecs VideoEncoder, the take's mic audio as AAC (AudioEncoder), muxed
 // into MP4 with mp4-muxer. Nothing depends on how fast the phone is: a slow phone takes longer, the file is the same.
+// Each frame is composed in 2D (layers.js): background color/image, images behind, Eliran, images in front.
 // Hat physics (spring bones) run on a fixed 1/60 s step from a settled start, so two renders give the same frames.
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
-import { sceneAt, applyScene } from "./edit.js?v=6";
-import { processVoice } from "./voice.js?v=6";
+import { sceneAt, applyScene } from "./edit.js?v=7";
+import { processVoice } from "./voice.js?v=7";
+import { composite } from "./layers.js?v=7";
 
 const PHYS_DT = 1 / 60, SETTLE = 90; // physics step; steps at the start pose before frame 0 so the hat is at rest
 export const SIZES = { "720": [720, 1280], "1080": [1080, 1920] };
@@ -40,9 +42,10 @@ export async function support() {
 }
 
 // voice = voice.js settings (the sound is processed at render time from the raw mic in the performance file)
+// bitmaps = the edit's decoded images (layers.js, Map id -> ImageBitmap)
 // opts: {size: "720"|"1080", fps: 30|60, ss: 1|2, onProgress({frame, frames, fps}), signal: {cancel}}
 // -> {blob (video/mp4), ms, frames, fps, w, h, codec, audio}
-export async function renderTake({ stage, pose, edit, take, opts, voice }) {
+export async function renderTake({ stage, pose, edit, take, opts, voice, bitmaps }) {
   const [w, h] = SIZES[opts.size] || SIZES["720"], fps = opts.fps || 30, ss = opts.ss || 1;
   const durationMs = take.header.durationMs, frames = Math.max(1, Math.round(durationMs / 1000 * fps));
   const bitrate = Math.round((w * h * fps) * (fps > 30 ? 0.12 : 0.16)); // ~8.8 Mbps 720p60, ~10 Mbps 1080p30
@@ -78,6 +81,7 @@ export async function renderTake({ stage, pose, edit, take, opts, voice }) {
   const g = out.getContext("2d", { alpha: false });
   g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
   stage.setSize(w * ss, h * ss);
+  stage.background(null); // Eliran on a transparent clear; the background is a layer
   const vrm = stage.vrm, gl = stage.renderer.domElement;
   const setAt = (t) => { pose.at(t); applyScene(stage, sceneAt(edit, t, stage)); };
   try {
@@ -103,7 +107,7 @@ export async function renderTake({ stage, pose, edit, take, opts, voice }) {
         vrm.humanoid.update(); vrm.expressionManager?.update(); vrm.nodeConstraintManager?.update();
       }
       stage.renderer.render(stage.scene, stage.camera);
-      g.drawImage(gl, 0, 0, w, h); // ss = 2: each output pixel = the average of 2x2 rendered pixels
+      composite(g, w, h, edit, t, gl, bitmaps); // ss = 2: Eliran scaled down, each output pixel = 2x2 rendered pixels
       const frame = new VideoFrame(out, { timestamp: Math.round(f * 1e6 / fps), duration: Math.round(1e6 / fps) });
       venc.encode(frame, { keyFrame: f % (fps * 2) === 0 });
       frame.close();

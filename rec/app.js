@@ -3,18 +3,19 @@
 // (play, share, save, delete) -> "נגן מחדש" drives Eliran from the file, and can record that to a new video ->
 // "ערוך" opens the timeline editor on the take (editor.js), which renders the edit offline to an MP4 (render.js).
 // Text in Hebrew; values from files are set with textContent.
-import { createStage } from "./avatar.js?v=6";
-import { createTracker } from "./tracking.js?v=6";
-import { FaceRig } from "./mapping.js?v=6";
-import { startRecording, pickType, frameDrawn } from "./recorder.js?v=6";
-import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=6";
-import { createEditor } from "./editor.js?v=6";
-import { BodyRig, GROUPS, DEFAULTS, loadSettings, saveSettings, loadPresets, savePresets, checkPresets, checkSettings, sameSettings, PRESET_FILE } from "./body.js?v=6";
-import { VOICE_PRESETS, VOICE_DEFAULTS, checkVoice, loadVoice, saveVoice, applyPreset, presetOf, processVoice, createLiveVoice, workletSupported } from "./voice.js?v=6";
+import { createStage } from "./avatar.js?v=7";
+import { createTracker } from "./tracking.js?v=7";
+import { FaceRig } from "./mapping.js?v=7";
+import { startRecording, pickType, frameDrawn } from "./recorder.js?v=7";
+import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=7";
+import { createEditor } from "./editor.js?v=7";
+import { mediaIds } from "./layers.js?v=7";
+import { BodyRig, GROUPS, DEFAULTS, loadSettings, saveSettings, loadPresets, savePresets, checkPresets, checkSettings, sameSettings, PRESET_FILE } from "./body.js?v=7";
+import { VOICE_PRESETS, VOICE_DEFAULTS, checkVoice, loadVoice, saveVoice, applyPreset, presetOf, processVoice, createLiveVoice, workletSupported } from "./voice.js?v=7";
 
 // Must match <meta name="rec-version"> in index.html. A different value = the phone mixed cached files from two
 // versions: reload once with a fresh URL (index.html then comes fresh and asks for matching files).
-const REC_VERSION = "6";
+const REC_VERSION = "7";
 if (document.querySelector('meta[name="rec-version"]')?.content !== REC_VERSION) {
   const key = "rec-reload-" + REC_VERSION;
   if (!sessionStorage.getItem(key)) {
@@ -76,6 +77,20 @@ const readModel = () => idb("readonly", (s) => s.get("vrm"));
 const putTake = (t) => idb("readwrite", (s) => s.put(t), TAKES);
 const allTakes = async () => ((await idb("readonly", (s) => s.getAll(), TAKES)) || []).sort((a, b) => b.at - a.at);
 const delTake = (id) => idb("readwrite", (s) => s.delete(id), TAKES);
+// Images for the editor (layers.js), version 7: in the same "files" store under "media:<id>" (no database upgrade):
+// {id, blob, name, type, w, h, at}. They stay while any take's edit uses them (gcMedia after a delete / editor close).
+const putMedia = (m) => idb("readwrite", (s) => s.put(m, "media:" + m.id));
+const getMedia = (id) => idb("readonly", (s) => s.get("media:" + id));
+async function gcMedia() {
+  try {
+    const used = new Set();
+    for (const t of await allTakes()) for (const id of mediaIds(t.edit)) used.add(id);
+    const keys = (await idb("readonly", (s) => s.getAllKeys())) || [];
+    const drop = keys.filter((k) => typeof k === "string" && k.startsWith("media:") && !used.has(k.slice(6)));
+    if (drop.length) await idb("readwrite", (s) => { for (const k of drop) s.delete(k); });
+    window.__rec.mediaGc = { kept: used.size, dropped: drop.length };
+  } catch (e) { console.warn("media gc", e); }
+}
 
 // ---- state ------------------------------------------------------------------------------------------------
 const stage = createStage(ui.view);
@@ -433,7 +448,7 @@ function takeItem(t, draft) {
       }),
       btn("🗑 מחק", async () => {
         if (!confirm(`למחוק את "${t.name}"? אי אפשר לשחזר.`)) return;
-        await delTake(t.id); renderTakes();
+        await delTake(t.id); renderTakes(); gcMedia();
       }, "danger"),
     );
     li.append(head, row);
@@ -557,7 +572,9 @@ const editor = createEditor({
   stage,
   getAudio: () => (actx ??= new AudioContext()),
   putTake, storeTake, openResult, say, bodySettings, voiceSettings, openSettings,
+  media: { put: putMedia, get: getMedia },
   onClose: (saved) => {
+    gcMedia();
     if (media) keepAwake();
     countDrafts();
     if (saved) { say("📝 הטיוטה נשמרה. חוזרים אליה מ-🎞 הקלטות, ומרנדרים כשמוכנים."); setTimeout(() => say(""), 3500); }
@@ -878,6 +895,7 @@ function loop(now) {
     if (rig && body) { body.update(BodyRig.input(rig), now); body.write(); }
   }
   stage.render(dt);
+  if (editor.active) editor.drawn(); // the 2D layers (background, images) around Eliran
   frameDrawn();
   take?.frame(now);
   stats.frames++;

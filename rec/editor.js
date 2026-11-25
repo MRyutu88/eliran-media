@@ -1,15 +1,16 @@
-// The editor on a take (docs/phone_recording.md, "Editor"): Eliran on top, three strips below (מצלמה / אפקטים / רקע)
+// The editor on a take (docs/phone_recording.md, "Editor"): Eliran on top, four strips below (מצלמה / אפקטים / רקע / תמונות)
 // like CapCut (the layout the user picked, 25.11). Time runs right to left (Hebrew), the playhead stays in the middle
 // and the strips move under it: drag to scrub, tap a block to edit it below the strips, drag a selected block to move
 // it. The edit (edit.js) is saved with the take on every change; "רנדר" makes the video offline (render.js).
 // Text in Hebrew; values from the take are set with textContent.
-import { readTake, PoseTrack } from "./take.js?v=6";
-import { FaceRig } from "./mapping.js?v=6";
-import { BG } from "./avatar.js?v=6";
-import { newEdit, checkEdit, newId, sceneAt, applyScene, cameraAt, COLORS, EFFECTS, DIRS, SHOTS } from "./edit.js?v=6";
-import { renderTake, support, SIZES } from "./render.js?v=6";
-import { BodyRig } from "./body.js?v=6";
-import { processVoice, voiceKey } from "./voice.js?v=6";
+import { readTake, PoseTrack } from "./take.js?v=7";
+import { FaceRig } from "./mapping.js?v=7";
+import { BG } from "./avatar.js?v=7";
+import { newEdit, checkEdit, newId, sceneAt, applyScene, cameraAt, COLORS, EFFECTS, DIRS, SHOTS } from "./edit.js?v=7";
+import { renderTake, support, SIZES } from "./render.js?v=7";
+import { BodyRig } from "./body.js?v=7";
+import { processVoice, voiceKey } from "./voice.js?v=7";
+import { composite, decode, mediaIds, hitImage, shownAt, ANIMS, SLIDE_DIRS, SPOTS } from "./layers.js?v=7";
 
 const $ = (id) => document.getElementById(id);
 const fmtT = (ms) => {
@@ -17,11 +18,12 @@ const fmtT = (ms) => {
   return `${m}:${(s - m * 60).toFixed(1).padStart(4, "0")}`;
 };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-const ROW = { camera: 0, effects: 1, bg: 2 };
+const ROW = { camera: 0, effects: 1, bg: 2, media: 3 };
 const RULER = 18, ROW_H = 34;
 const light = (hex) => { const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)); return r * 0.3 + g * 0.59 + b * 0.11 > 150; };
 
 // ctx: {stage, getAudio() -> AudioContext, putTake(rec), storeTake(rec), openResult(rec), say(text, bad),
+//       media: {put(rec), get(id)} (the picked images, app.js "media:<id>"),
 //       bodySettings (body.js, the current "⚙ הגדרות"), voiceSettings (voice.js), openSettings(), onClose(saved)}
 // Draft: the edit is the take's draft. It is saved on every change (400 ms later) and the bar says so ("✓ נשמר");
 // "שמור וסגור" saves at once and leaves; the takes list shows it under "טיוטות" until it is rendered.
@@ -30,7 +32,8 @@ export function createEditor(ctx) {
   const ui = {
     root: $("editor"), title: $("ed-title"), play: $("ed-play"), time: $("ed-time"), undo: $("ed-undo"),
     zin: $("ed-zin"), zout: $("ed-zout"), set: $("ed-set"), tl: $("ed-tl"), content: $("ed-content"), add: $("ed-add"),
-    addCam: $("ed-add-cam"), addFx: $("ed-add-fx"), addBg: $("ed-add-bg"),
+    addCam: $("ed-add-cam"), addFx: $("ed-add-fx"), addBg: $("ed-add-bg"), addImg: $("ed-add-img"), pick: $("ed-pick"),
+    comp: $("ed-comp"),
     sheet: $("ed-sheet"), shTitle: $("ed-sh-title"), shBody: $("ed-sh-body"), shHere: $("ed-sh-here"),
     shDel: $("ed-sh-del"), shOk: $("ed-sh-ok"), close: $("ed-close"), render: $("ed-render"), saved: $("ed-saved"),
     rSheet: $("render"), rOpts: $("r-opts"), rNote: $("r-note"), rGo: $("r-go"), rCancel: $("r-cancel"),
@@ -51,7 +54,9 @@ export function createEditor(ctx) {
     const rig = new FaceRig(stage.vrm);
     const body = new BodyRig(stage.vrm, stage, ctx.bodySettings);
     S = { rec, data, edit, pose: new PoseTrack(data, rig, body), dur: data.header.durationMs, tv: 0, k: 0.06,
-          playing: false, sel: null, undo: [], buffer: null, raw: null, voiceKey: null, src: null, rendering: false };
+          playing: false, sel: null, undo: [], buffer: null, raw: null, voiceKey: null, src: null, rendering: false,
+          bmp: new Map(), thumbs: new Map() };
+    await loadMedia(mediaIds(edit));
     if (data.audio) {
       try {
         const ac = ctx.getAudio(); await ac.resume();
@@ -64,6 +69,7 @@ export function createEditor(ctx) {
     ui.title.textContent = rec.name;
     ui.root.hidden = false;
     document.body.classList.add("editing");
+    stage.background(null); // Eliran on a transparent clear; the background and the images are 2D layers (drawn())
     stage.vrm.springBoneManager?.reset();
     select(null);
     draw();
@@ -75,6 +81,7 @@ export function createEditor(ctx) {
     const had = !!S.rec.edit || saveTimer !== null;
     const ok = await flushSave();
     if (!S) return;
+    for (const b of S.bmp.values()) b?.close?.();
     S = null;
     ui.root.hidden = true;
     document.body.classList.remove("editing");
@@ -206,7 +213,7 @@ export function createEditor(ctx) {
       tick.style.right = `${t * k}px`;
       ruler.append(tick);
     }
-    const rows = ["camera", "effects", "bg"].map((name) => {
+    const rows = ["camera", "effects", "bg", "media"].map((name) => {
       const r = el("div", "ed-row"); r.style.top = `${RULER + ROW[name] * ROW_H}px`; c.append(r); return r;
     });
     const item = (row, id, t, w, label, bg, fg) => {
@@ -217,6 +224,13 @@ export function createEditor(ctx) {
       it.style.background = bg;
       if (fg) it.style.color = fg;
       rows[row].append(it);
+      return it;
+    };
+    const withThumb = (it, img) => {
+      const u = img && S.thumbs.get(img);
+      if (!u) return;
+      it.style.backgroundImage = `url(${u})`;
+      it.classList.add("img");
     };
     // camera: the start view, then each key with its move
     const keys = [...edit.camera].sort((a, b) => a.t - b.t);
@@ -226,11 +240,17 @@ export function createEditor(ctx) {
     for (const e of edit.effects) item(1, e.id, e.t, e.dur * k, EFFECTS[e.type]?.name + (e.dir && (e.type === "enter" || e.type === "exit") ? " " + DIRS[e.dir] : ""), "#FF8FCF");
     // background: segments to the next change
     const bgs = [...edit.bg].sort((a, b) => a.t - b.t);
-    const segs = [{ id: "bg0", t: 0, color: edit.bg0 }, ...bgs];
+    const segs = [{ id: "bg0", t: 0, color: edit.bg0, img: edit.bg0img }, ...bgs];
     segs.forEach((b, i) => {
-      const end = segs[i + 1]?.t ?? dur, name = COLORS.find((x) => x.color.toLowerCase() === b.color.toLowerCase())?.name || b.color;
-      item(2, b.id, b.t, (end - b.t) * k, name, b.color, light(b.color) ? "#16101C" : "#FFF6EE");
+      const end = segs[i + 1]?.t ?? dur, name = b.img ? "🖼 תמונה" : COLORS.find((x) => x.color.toLowerCase() === b.color.toLowerCase())?.name || b.color;
+      withThumb(item(2, b.id, b.t, (end - b.t) * k, name, b.color, light(b.color) ? "#16101C" : "#FFF6EE"), b.img);
     });
+    // images
+    for (const m of edit.media) {
+      const it = item(3, m.id, m.t, m.dur * k, m.layer === "back" ? "🖼 מאחור" : "🖼", "#3DD9C9", "#16101C");
+      withThumb(it, m.img);
+      if (!S.bmp.get(m.img)) it.textContent = "⚠ חסרה";
+    }
     place();
     ui.undo.disabled = !S.undo.length;
   }
@@ -270,13 +290,18 @@ export function createEditor(ctx) {
   function find(id) {
     const e = S.edit;
     if (id === "cam0") return e.cam0;
-    if (id === "bg0") return { id: "bg0", t: 0, get color() { return e.bg0; }, set color(v) { e.bg0 = v; } };
-    return e.camera.find((x) => x.id === id) || e.effects.find((x) => x.id === id) || e.bg.find((x) => x.id === id) || null;
+    if (id === "bg0") return { id: "bg0", t: 0, get color() { return e.bg0; }, set color(v) { e.bg0 = v; },
+      get img() { return e.bg0img; }, set img(v) { e.bg0img = v; }, get fit() { return e.bg0fit; }, set fit(v) { e.bg0fit = v; },
+      get kb() { return e.bg0kb; }, set kb(v) { e.bg0kb = v; } };
+    return e.camera.find((x) => x.id === id) || e.effects.find((x) => x.id === id) || e.bg.find((x) => x.id === id)
+      || e.media.find((x) => x.id === id) || null;
   }
   const kindOf = (id) => (id === "cam0" || S.edit.camera.some((x) => x.id === id) ? "camera"
-    : S.edit.effects.some((x) => x.id === id) ? "effects" : "bg");
+    : S.edit.effects.some((x) => x.id === id) ? "effects" : S.edit.media.some((x) => x.id === id) ? "media" : "bg");
   function select(id) {
     if (S) S.sel = id;
+    const m = id && S?.edit.media.find((x) => x.id === id);
+    if (m && !S.playing && (S.tv < shownAt(m) || S.tv > m.t + m.dur - 260)) seek(Math.min(shownAt(m), m.t + m.dur), true);
     ui.sheet.hidden = !id;
     ui.add.hidden = !!id;
     if (id) sheet();
@@ -286,7 +311,7 @@ export function createEditor(ctx) {
   ui.shDel.onclick = () => {
     const id = S.sel; if (!id || id === "cam0" || id === "bg0") return;
     const before = snap();
-    for (const list of [S.edit.camera, S.edit.effects, S.edit.bg]) { const i = list.findIndex((x) => x.id === id); if (i >= 0) list.splice(i, 1); }
+    for (const list of [S.edit.camera, S.edit.effects, S.edit.bg, S.edit.media]) { const i = list.findIndex((x) => x.id === id); if (i >= 0) list.splice(i, 1); }
     S.sel = null; changed(before); select(null);
   };
   ui.shHere.onclick = () => {
@@ -369,10 +394,32 @@ export function createEditor(ctx) {
         chips("משך", [[300, "0.3 ש׳"], [600, "0.6 ש׳"], [900, "0.9 ש׳"], [1500, "1.5 ש׳"], [2000, "2 ש׳"], [3000, "3 ש׳"]], it.dur, (v) => { it.dur = v; }),
         chips("עוצמה", [[0.5, "עדין"], [1, "רגיל"], [1.5, "חזק"]], it.strength, (v) => { it.strength = v; }),
       );
+    } else if (kind === "media") {
+      ui.shTitle.textContent = `תמונה · ${at}`;
+      const spot = Object.keys(SPOTS).find((k) => Math.abs(SPOTS[k].x - it.x) < 0.01 && Math.abs(SPOTS[k].y - it.y) < 0.01) ?? null;
+      body.append(
+        imageField(it, false),
+        chips("משך", [[1000, "1 ש׳"], [2000, "2 ש׳"], [3000, "3 ש׳"], [5000, "5 ש׳"], [8000, "8 ש׳"]], it.dur, (v) => { it.dur = v; }),
+        chips("כניסה", Object.entries(ANIMS), it.anim, (v) => { it.anim = v; if (v === "slide" && !it.dir) it.dir = "right"; }),
+      );
+      if (it.anim === "slide") body.append(chips("כיוון", Object.entries(SLIDE_DIRS), it.dir, (v) => { it.dir = v; }));
+      body.append(
+        chips("מיקום", Object.entries(SPOTS).map(([k, v]) => [k, v.name]), spot, (v) => { it.x = SPOTS[v].x; it.y = SPOTS[v].y; }),
+        slider("גודל", 0.1, 1.2, 0.01, it.w, (v) => { it.w = v; }, ["קטן", "גדול"]),
+        slider("סיבוב", -30, 30, 1, it.rot || 0, (v) => { it.rot = v; }, ["↺", "↻"]),
+        chips("סגנון", [["plain", "רגיל"], ["sticker", "סטיקר"]], it.style, (v) => { it.style = v; }),
+        chips("שכבה", [["front", "לפני אלירן"], ["back", "מאחורי אלירן"]], it.layer === "back" ? "back" : "front", (v) => { it.layer = v; }),
+        el("p", "ed-tip", "אפשר גם לגרור את התמונה על המסך, ולצבוט בשתי אצבעות כדי לשנות את הגודל."),
+      );
     } else {
       ui.shTitle.textContent = `רקע · ${at}`;
+      body.append(imageField(it, true));
+      if (it.img) body.append(
+        chips("התאמה", [["cover", "ממלאת את המסך"], ["contain", "כולה, צבע מסביב"]], it.fit === "contain" ? "contain" : "cover", (v) => { it.fit = v; }),
+        chips("תנועה", [[false, "סטטית"], [true, "זום איטי"]], !!it.kb, (v) => { it.kb = v; }),
+      );
       const wrap = el("div", "ed-field"), row = el("div", "ed-swatches");
-      wrap.append(el("span", "ed-lbl2", "צבע"), row);
+      wrap.append(el("span", "ed-lbl2", it.img ? "צבע מסביב" : "צבע"), row);
       for (const c of COLORS) {
         const b = el("button", "sw");
         b.style.background = c.color;
@@ -385,6 +432,147 @@ export function createEditor(ctx) {
       if (!fixed) body.append(chips("מעבר", [[0, "חיתוך"], [300, "0.3 ש׳"], [1000, "1 ש׳"]], it.fade, (v) => { it.fade = v; }));
     }
   }
+
+  // ---- images (layers.js) ------------------------------------------------------------------------------------------
+  // Picked from the phone, kept in IndexedDB ("media:<id>", never uploaded), decoded once into S.bmp.
+  const thumbOf = (bmp) => {
+    const c = document.createElement("canvas"), s = 64 / Math.max(bmp.width, bmp.height);
+    c.width = Math.max(1, Math.round(bmp.width * s)); c.height = Math.max(1, Math.round(bmp.height * s));
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    return c.toDataURL("image/png");
+  };
+  async function loadMedia(ids) {
+    for (const id of ids) {
+      if (S.bmp.has(id)) continue;
+      let bmp = null;
+      try { const m = await ctx.media.get(id); if (m?.blob) bmp = await decode(m.blob); } catch (e) { console.warn("media", id, e); }
+      S.bmp.set(id, bmp);
+      if (bmp) S.thumbs.set(id, thumbOf(bmp));
+    }
+  }
+  // Opens the phone's picker -> {id, type} of the new media, or null (cancelled / unreadable / no room).
+  function pickImage() {
+    return new Promise((resolve) => {
+      const inp = ui.pick;
+      inp.value = "";
+      inp.onchange = async () => { inp.onchange = inp.oncancel = null; const f = inp.files?.[0]; resolve(f ? await addMedia(f) : null); };
+      inp.oncancel = () => { inp.onchange = inp.oncancel = null; resolve(null); };
+      inp.click();
+    });
+  }
+  async function addMedia(file) {
+    if (!S) return null;
+    ctx.say("טוען תמונה…");
+    let bmp;
+    try { bmp = await decode(file); } catch (e) {
+      console.warn(e); ctx.say("לא הצלחתי לפתוח את התמונה. לבחור JPG או PNG.", true); return null;
+    }
+    const id = newId();
+    try { await ctx.media.put({ id, blob: file, name: file.name, type: file.type, w: bmp.width, h: bmp.height, at: Date.now() }); }
+    catch (e) { console.error(e); bmp.close(); ctx.say("לא הצלחתי לשמור את התמונה בטלפון (אין מקום?).", true); return null; }
+    if (!S) { bmp.close(); return null; }
+    S.bmp.set(id, bmp); S.thumbs.set(id, thumbOf(bmp));
+    const gif = /gif/i.test(file.type);
+    ctx.say(gif ? "GIF נכנס כתמונה (הפריים הראשון)." : "");
+    if (gif) setTimeout(() => ctx.say(""), 3000);
+    return { id, type: file.type || "" };
+  }
+  // The "תמונה" row of a panel: pick / replace (and for a background, remove).
+  function imageField(it, removable) {
+    const wrap = el("div", "ed-field"), row = el("div", "chips");
+    wrap.append(el("span", "ed-lbl2", "תמונה"), row);
+    const b = el("button", "", it.img ? "🖼 החלף תמונה" : "🖼 בחר תמונה");
+    b.onclick = async () => {
+      pause();
+      const got = await pickImage();
+      if (!got || !S) return;
+      const before = snap(); it.img = got.id; changed(before); sheet();
+    };
+    row.append(b);
+    if (removable && it.img) {
+      const x = el("button", "", "✕ בלי תמונה");
+      x.onclick = () => { const before = snap(); it.img = undefined; it.fit = undefined; it.kb = undefined; changed(before); sheet(); };
+      row.append(x);
+    }
+    if (it.img && !S.bmp.get(it.img)) row.append(el("span", "ed-warn", "⚠ התמונה לא נמצאה בטלפון"));
+    return wrap;
+  }
+  ui.addImg.onclick = async () => {
+    if (!S || S.rendering) return;
+    pause();
+    const t = Math.round(Math.min(S.tv, Math.max(0, S.dur - 500)));
+    const got = await pickImage();
+    if (!got || !S) return;
+    const bmp = S.bmp.get(got.id), before = snap();
+    // as wide as 60% of the frame, but no taller than half of it
+    const w = Math.min(0.6, 0.5 * (16 / 9) * bmp.width / bmp.height);
+    // PNG/WebP/GIF are often cut-outs with a transparent background: no sticker frame around them by default
+    const style = /png|gif|webp/i.test(got.type) ? "plain" : "sticker";
+    const m = { id: newId(), t, dur: Math.max(500, Math.min(2000, S.dur - t)), img: got.id, x: 0.5, y: 0.45,
+                w: Math.round(w * 100) / 100, rot: 0, anim: "pop", style, layer: "front" };
+    S.edit.media.push(m); changed(before); select(m.id);
+  };
+
+  // The preview: background, images behind, Eliran, images in front (layers.js), drawn after every stage render.
+  let g2 = null;
+  function drawn() {
+    if (!S || S.rendering) return;
+    g2 ??= ui.comp.getContext("2d", { alpha: false });
+    const sel = S.sel && S.edit.media.some((m) => m.id === S.sel) ? S.sel : null;
+    composite(g2, ui.comp.width, ui.comp.height, S.edit, S.tv, stage.renderer.domElement, S.bmp, { sel });
+  }
+  // On the preview: tap an image to select it, drag it to move, pinch to resize (the selected image). The gestures
+  // are on the whole stage area, so a pinch works when a finger lands beside the (small) preview.
+  const pts = new Map(), surface = ui.comp.parentElement;
+  let gest = null;
+  surface.addEventListener("pointerdown", (e) => {
+    if (!S || S.rendering) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    surface.setPointerCapture(e.pointerId);
+    if (pts.size === 1) {
+      const r = ui.comp.getBoundingClientRect();
+      const hit = hitImage(S.edit, S.tv, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height, S.bmp);
+      const m = hit || S.edit.media.find((x) => x.id === S.sel) || null;
+      if (!m) { gest = null; return; }
+      pause();
+      if (hit && hit.id !== S.sel) select(hit.id);
+      gest = { m, before: snap(), x0: e.clientX, y0: e.clientY, mx: m.x, my: m.y, w0: m.w, d0: 0, moved: false };
+    } else if (gest && pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      gest.d0 = Math.hypot(a.x - b.x, a.y - b.y); gest.w0 = gest.m.w;
+    }
+  });
+  surface.addEventListener("pointermove", (e) => {
+    if (!gest || !pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const m = gest.m, r = ui.comp.getBoundingClientRect();
+    if (pts.size >= 2 && gest.d0 > 0) {
+      const [a, b] = [...pts.values()];
+      m.w = Math.round(Math.min(1.5, Math.max(0.08, gest.w0 * Math.hypot(a.x - b.x, a.y - b.y) / gest.d0)) * 1000) / 1000;
+    } else if (pts.size === 1) {
+      const dx = e.clientX - gest.x0, dy = e.clientY - gest.y0;
+      if (!gest.moved && Math.hypot(dx, dy) < 6) return;
+      m.x = Math.round(Math.min(1.2, Math.max(-0.2, gest.mx + dx / r.width)) * 1000) / 1000;
+      m.y = Math.round(Math.min(1.2, Math.max(-0.2, gest.my + dy / r.height)) * 1000) / 1000;
+    }
+    gest.moved = true;
+    S.edit.updated = Date.now(); showSaved("dirty");
+  });
+  const compUp = (e) => {
+    pts.delete(e.pointerId);
+    if (!gest) return;
+    if (pts.size === 1) { // the pinch ended with one finger left: go on dragging from here
+      const [p] = [...pts.values()];
+      Object.assign(gest, { x0: p.x, y0: p.y, mx: gest.m.x, my: gest.m.y, d0: 0 });
+      return;
+    }
+    if (pts.size === 0) {
+      const g = gest; gest = null;
+      if (g.moved && S) { changed(g.before); if (S.sel === g.m.id) sheet(); }
+    }
+  };
+  surface.addEventListener("pointerup", compUp);
+  surface.addEventListener("pointercancel", compUp);
 
   // ---- render -----------------------------------------------------------------------------------------------------
   let can = null;
@@ -443,7 +631,7 @@ export function createEditor(ctx) {
     const t0 = performance.now(), src = S.rec;
     try {
       const res = await renderTake({
-        stage, pose: S.pose, edit: S.edit, take: S.data, voice: ctx.voiceSettings,
+        stage, pose: S.pose, edit: S.edit, take: S.data, voice: ctx.voiceSettings, bitmaps: S.bmp,
         opts: { ...opts, signal: job, onProgress: ({ frame, frames, fps }) => {
           ui.rFill.style.width = `${(100 * frame / frames).toFixed(1)}%`;
           const left = (frames - frame) / Math.max(0.1, fps) * 1000;
@@ -479,6 +667,6 @@ export function createEditor(ctx) {
     }
   };
 
-  const api = { open, close, tick, bodyChanged, voiceChanged, flushSave, get active() { return !!S; }, get rendering() { return !!S?.rendering; }, get state() { return S; } };
+  const api = { open, close, tick, drawn, bodyChanged, voiceChanged, flushSave, get active() { return !!S; }, get rendering() { return !!S?.rendering; }, get state() { return S; } };
   return api;
 }

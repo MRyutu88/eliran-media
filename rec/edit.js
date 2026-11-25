@@ -13,9 +13,16 @@
 //              "enter" / "exit" (dir "right" | "left" | "down" | "pop"); after an exit Eliran stays out of frame until
 //              the next enter, and before a first enter he is out. strength 0.5 | 1 | 1.5.
 //     bg0:     "#rrggbb"                       the background before the first change
-//     bg:      [{id, t, color, fade}]         from t the background turns to color over `fade` ms (0 = cut) }
+//     bg:      [{id, t, color, fade, img?, fit?, kb?}]  from t the background turns to this over `fade` ms (0 = cut)
+//     Since page version 7 (optional fields, layers.js):
+//     bg0img, bg0fit, bg0kb / img, fit, kb on a change: a background image (a media id, IndexedDB "media:<id>"),
+//              fit "cover" (fills the frame, default) | "contain" (whole, the color around it), kb = slow zoom in.
+//     media:   [{id, t, dur, img, x, y, w, rot, anim, dir?, style, layer}]  images that pop up from t for dur ms:
+//              x/y = center as a fraction of the frame (from the left / top), w = width as a fraction of the frame,
+//              rot degrees, anim "pop"|"slide"|"fade"|"cut" (dir "right"|"left"|"up"|"down" for slide),
+//              style "plain"|"sticker" (cream border + shadow), layer "front"|"back" (behind Eliran). }
 // A new optional field = same version; a changed meaning = version 2 (readers refuse newer versions).
-import { BG } from "./avatar.js?v=6";
+import { BG } from "./avatar.js?v=7";
 
 export const EDIT_VERSION = 1;
 
@@ -39,14 +46,15 @@ export const newId = () => Date.now().toString(36) + (seq++).toString(36);
 export function newEdit(take) {
   const shot = take?.header?.settings?.framing === "close" ? "close" : "body";
   return { format: "eliran-edit", version: EDIT_VERSION, updated: Date.now(),
-           cam0: { shot, zoom: 1, panX: 0, panY: 0 }, camera: [], effects: [], bg0: BG, bg: [] };
+           cam0: { shot, zoom: 1, panX: 0, panY: 0 }, camera: [], effects: [], bg0: BG, bg: [], media: [] };
 }
 export function checkEdit(e) {
   if (!e || e.format !== "eliran-edit") return null;
   if (e.version > EDIT_VERSION) throw new Error("edit-too-new");
+  e.media ??= [];
   return e;
 }
-export const isEmpty = (e) => !e.camera.length && !e.effects.length && !e.bg.length;
+export const isEmpty = (e) => !e.camera.length && !e.effects.length && !e.bg.length && !e.media?.length && !e.bg0img;
 
 // ---- easing -------------------------------------------------------------------------------------------------
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
@@ -149,8 +157,9 @@ export function sceneAt(edit, t, stage) {
   const v = cameraAt(edit, t, stage.shots), { fx, zoom } = effectsAt(edit, t, stage.size, stage.shots);
   return { view: { ...v, dist: v.dist / zoom }, fx, bg: backgroundAt(edit, t) };
 }
+// The background is not set on the stage: the editor and the render clear it to transparent and draw the background
+// (color or image) and the images as 2D layers around Eliran (layers.js composite).
 export function applyScene(stage, sc) {
   stage.view(sc.view);
   stage.place(sc.fx);
-  stage.background(sc.bg);
 }

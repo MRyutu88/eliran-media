@@ -38,7 +38,12 @@
   #fps b { color: var(--cream); font-weight: 600; }
   #fps .warn { color: var(--hot); } #fps .bad { color: var(--raspberry); }
   .stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; position: relative; padding: 0 8px; }
-  #view { height: 100%; max-width: 100%; aspect-ratio: 9 / 16; border-radius: 14px; background: var(--plum); display: block; }
+  #view, #ed-comp { height: 100%; max-width: 100%; aspect-ratio: 9 / 16; border-radius: 14px; background: var(--plum); display: block; }
+  /* editing: the WebGL canvas renders hidden (transparent clear) and #ed-comp shows it with the 2D layers (layers.js) */
+  #ed-comp { display: none; touch-action: none; }
+  body.editing #view { display: none; }
+  body.editing #ed-comp { display: block; }
+  body.editing .stage { touch-action: none; }
   #cam { position: absolute; top: 8px; inset-inline-end: 16px; width: 26%; max-width: 140px; border-radius: 10px;
          transform: scaleX(-1); border: 2px solid var(--line); background: #000; }
   #rec-dot { position: absolute; top: 14px; inset-inline-start: 18px; background: var(--raspberry); color: #fff; font-weight: 700;
@@ -86,7 +91,7 @@
   #ed-play { background: var(--hot); color: var(--ink); font-weight: 700; min-width: 52px; }
   #ed-time { white-space: nowrap; direction: ltr; font: 13px ui-monospace, Consolas, monospace; color: var(--dim); }
   #ed-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-  #ed-tl { position: relative; height: 122px; overflow: hidden; background: #110c16; border-radius: 10px; touch-action: none;
+  #ed-tl { position: relative; height: 156px; overflow: hidden; background: #110c16; border-radius: 10px; touch-action: none;
            user-select: none; -webkit-user-select: none; }
   #ed-content { position: absolute; top: 0; bottom: 0; right: 50%; will-change: transform; z-index: 1; }
   .ed-ruler { position: absolute; top: 0; height: 18px; left: 0; right: 0; }
@@ -97,6 +102,10 @@
   .it { position: absolute; top: 3px; bottom: 3px; border-radius: 6px; font-size: 12px; line-height: 26px; padding: 0 6px;
         overflow: hidden; white-space: nowrap; color: var(--ink); font-weight: 600; box-shadow: inset 0 0 0 1px rgba(0,0,0,.25); }
   .it.sel { outline: 2px solid var(--hot); outline-offset: 1px; z-index: 2; }
+  .it.img { background-size: auto 100%; background-repeat: repeat-x; background-position: right center; color: #fff;
+            text-shadow: 0 0 3px #000, 0 0 2px #000; }
+  .ed-tip { margin: 0; font-size: 12px; color: var(--dim); }
+  .ed-warn { font-size: 12px; color: var(--raspberry); font-weight: 700; align-self: center; }
   /* the strip names sit under the blocks (shown where a strip is empty) */
   .ed-names { position: absolute; top: 18px; right: 6px; pointer-events: none; display: flex; flex-direction: column; z-index: 0; }
   .ed-names span { height: 34px; line-height: 32px; font-size: 10px; color: var(--dim); }
@@ -176,6 +185,7 @@
 
 <div class="stage">
   <canvas id="view" width="720" height="1280"></canvas>
+  <canvas id="ed-comp" width="720" height="1280"></canvas>
   <video id="cam" playsinline muted hidden></video>
   <div id="rec-dot" hidden>● 0:00</div>
   <div id="status" role="status">טוען…</div>
@@ -222,13 +232,15 @@
   </div>
   <div id="ed-tl">
     <div id="ed-content"></div>
-    <div class="ed-names"><span>מצלמה</span><span>אפקטים</span><span>רקע</span></div>
+    <div class="ed-names"><span>מצלמה</span><span>אפקטים</span><span>רקע</span><span>תמונות</span></div>
     <div id="ed-head"></div>
   </div>
   <div id="ed-add" class="row">
     <button id="ed-add-cam">+ מצלמה</button>
     <button id="ed-add-fx">+ אפקט</button>
     <button id="ed-add-bg">+ רקע</button>
+    <button id="ed-add-img">+ תמונה</button>
+    <input id="ed-pick" type="file" accept="image/*" hidden>
   </div>
   <div id="ed-sheet" hidden>
     <div class="ed-sh-top">
@@ -293,7 +305,7 @@
 <!-- REC_VERSION: bump it here, in app.js and in every local import ("?v=") on each publish (docs/phone_recording.md,
      "Updates and the phone's cache"). GitHub Pages lets the phone cache each file for 10 minutes; mixed old/new files
      crashed the page on "טוען…" (25.11). -->
-<meta name="rec-version" content="6">
+<meta name="rec-version" content="7">
 <script>
   // Boot guard: if the page code fails to load or crashes before it starts, say so (with a fresh reload) instead of
   // "טוען…" forever.
@@ -316,6 +328,6 @@
     setTimeout(function () { fail("לקח יותר מדי זמן, אולי אין אינטרנט"); }, 40000);
   })();
 </script>
-<script type="module" src="app.js?v=6" onerror="__recBootFail('קובץ חסר')"></script>
+<script type="module" src="app.js?v=7" onerror="__recBootFail('קובץ חסר')"></script>
 </body>
 </html>
