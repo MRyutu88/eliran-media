@@ -4,7 +4,8 @@
 // into MP4 with mp4-muxer. Nothing depends on how fast the phone is: a slow phone takes longer, the file is the same.
 // Hat physics (spring bones) run on a fixed 1/60 s step from a settled start, so two renders give the same frames.
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
-import { sceneAt, applyScene } from "./edit.js?v=5";
+import { sceneAt, applyScene } from "./edit.js?v=6";
+import { processVoice } from "./voice.js?v=6";
 
 const PHYS_DT = 1 / 60, SETTLE = 90; // physics step; steps at the start pose before frame 0 so the hat is at rest
 export const SIZES = { "720": [720, 1280], "1080": [1080, 1920] };
@@ -25,7 +26,7 @@ async function pickVideoConfig(w, h, fps, bitrate) {
 async function pickAudioConfig(sampleRate, numberOfChannels) {
   if (typeof AudioEncoder === "undefined") return null;
   for (const [codec, mux] of [["mp4a.40.2", "aac"], ["opus", "opus"]]) {
-    const cfg = { codec, sampleRate, numberOfChannels, bitrate: 128_000 };
+    const cfg = { codec, sampleRate, numberOfChannels, bitrate: 160_000 };
     try { if ((await AudioEncoder.isConfigSupported(cfg)).supported) return { cfg, mux }; } catch { /* next */ }
   }
   return null;
@@ -38,9 +39,10 @@ export async function support() {
   return { video: !!v, audio: a?.mux ?? null, codec: v?.codec ?? null };
 }
 
+// voice = voice.js settings (the sound is processed at render time from the raw mic in the performance file)
 // opts: {size: "720"|"1080", fps: 30|60, ss: 1|2, onProgress({frame, frames, fps}), signal: {cancel}}
 // -> {blob (video/mp4), ms, frames, fps, w, h, codec, audio}
-export async function renderTake({ stage, pose, edit, take, opts }) {
+export async function renderTake({ stage, pose, edit, take, opts, voice }) {
   const [w, h] = SIZES[opts.size] || SIZES["720"], fps = opts.fps || 30, ss = opts.ss || 1;
   const durationMs = take.header.durationMs, frames = Math.max(1, Math.round(durationMs / 1000 * fps));
   const bitrate = Math.round((w * h * fps) * (fps > 30 ? 0.12 : 0.16)); // ~8.8 Mbps 720p60, ~10 Mbps 1080p30
@@ -52,7 +54,8 @@ export async function renderTake({ stage, pose, edit, take, opts }) {
   if (take.audio) {
     try {
       const ac = new OfflineAudioContext(1, 1, 48000);
-      const buf = await ac.decodeAudioData(await take.audio.arrayBuffer());
+      const raw = await ac.decodeAudioData(await take.audio.arrayBuffer());
+      const buf = await processVoice(raw, voice); // the voice changer + clean-up (voice.js), the delay removed
       const acfg = await pickAudioConfig(buf.sampleRate, buf.numberOfChannels);
       if (acfg) audio = { buf, ...acfg };
     } catch (e) { console.warn("render audio", e); }

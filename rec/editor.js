@@ -3,12 +3,13 @@
 // and the strips move under it: drag to scrub, tap a block to edit it below the strips, drag a selected block to move
 // it. The edit (edit.js) is saved with the take on every change; "רנדר" makes the video offline (render.js).
 // Text in Hebrew; values from the take are set with textContent.
-import { readTake, PoseTrack } from "./take.js?v=5";
-import { FaceRig } from "./mapping.js?v=5";
-import { BG } from "./avatar.js?v=5";
-import { newEdit, checkEdit, newId, sceneAt, applyScene, cameraAt, COLORS, EFFECTS, DIRS, SHOTS } from "./edit.js?v=5";
-import { renderTake, support, SIZES } from "./render.js?v=5";
-import { BodyRig } from "./body.js?v=5";
+import { readTake, PoseTrack } from "./take.js?v=6";
+import { FaceRig } from "./mapping.js?v=6";
+import { BG } from "./avatar.js?v=6";
+import { newEdit, checkEdit, newId, sceneAt, applyScene, cameraAt, COLORS, EFFECTS, DIRS, SHOTS } from "./edit.js?v=6";
+import { renderTake, support, SIZES } from "./render.js?v=6";
+import { BodyRig } from "./body.js?v=6";
+import { processVoice, voiceKey } from "./voice.js?v=6";
 
 const $ = (id) => document.getElementById(id);
 const fmtT = (ms) => {
@@ -21,7 +22,9 @@ const RULER = 18, ROW_H = 34;
 const light = (hex) => { const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)); return r * 0.3 + g * 0.59 + b * 0.11 > 150; };
 
 // ctx: {stage, getAudio() -> AudioContext, putTake(rec), storeTake(rec), openResult(rec), say(text, bad),
-//       bodySettings (body.js, the current "⚙ הגדרות"), openSettings(), onClose()}
+//       bodySettings (body.js, the current "⚙ הגדרות"), voiceSettings (voice.js), openSettings(), onClose(saved)}
+// Draft: the edit is the take's draft. It is saved on every change (400 ms later) and the bar says so ("✓ נשמר");
+// "שמור וסגור" saves at once and leaves; the takes list shows it under "טיוטות" until it is rendered.
 export function createEditor(ctx) {
   const { stage } = ctx;
   const ui = {
@@ -29,7 +32,7 @@ export function createEditor(ctx) {
     zin: $("ed-zin"), zout: $("ed-zout"), set: $("ed-set"), tl: $("ed-tl"), content: $("ed-content"), add: $("ed-add"),
     addCam: $("ed-add-cam"), addFx: $("ed-add-fx"), addBg: $("ed-add-bg"),
     sheet: $("ed-sheet"), shTitle: $("ed-sh-title"), shBody: $("ed-sh-body"), shHere: $("ed-sh-here"),
-    shDel: $("ed-sh-del"), shOk: $("ed-sh-ok"), close: $("ed-close"), render: $("ed-render"),
+    shDel: $("ed-sh-del"), shOk: $("ed-sh-ok"), close: $("ed-close"), render: $("ed-render"), saved: $("ed-saved"),
     rSheet: $("render"), rOpts: $("r-opts"), rNote: $("r-note"), rGo: $("r-go"), rCancel: $("r-cancel"),
     rBar: $("r-bar"), rFill: $("r-fill"), rText: $("r-text"),
   };
@@ -48,11 +51,15 @@ export function createEditor(ctx) {
     const rig = new FaceRig(stage.vrm);
     const body = new BodyRig(stage.vrm, stage, ctx.bodySettings);
     S = { rec, data, edit, pose: new PoseTrack(data, rig, body), dur: data.header.durationMs, tv: 0, k: 0.06,
-          playing: false, sel: null, undo: [], buffer: null, src: null, rendering: false };
+          playing: false, sel: null, undo: [], buffer: null, raw: null, voiceKey: null, src: null, rendering: false };
     if (data.audio) {
-      try { const ac = ctx.getAudio(); await ac.resume(); S.buffer = await ac.decodeAudioData(await data.audio.arrayBuffer()); }
-      catch (e) { console.warn("editor audio", e); }
+      try {
+        const ac = ctx.getAudio(); await ac.resume();
+        S.raw = await ac.decodeAudioData(await data.audio.arrayBuffer());
+        await voiceNow();
+      } catch (e) { console.warn("editor audio", e); }
     }
+    showSaved(rec.edit ? "saved" : "new");
     ctx.say("");
     ui.title.textContent = rec.name;
     ui.root.hidden = false;
@@ -62,10 +69,12 @@ export function createEditor(ctx) {
     draw();
     window.__rec.editor = api;
   }
-  function close() {
+  async function close() {
     if (!S || S.rendering) return;
     pause();
-    flushSave();
+    const had = !!S.rec.edit || saveTimer !== null;
+    const ok = await flushSave();
+    if (!S) return;
     S = null;
     ui.root.hidden = true;
     document.body.classList.remove("editing");
@@ -73,12 +82,24 @@ export function createEditor(ctx) {
     stage.background(BG);
     stage.frame(stage.framing);
     stage.vrm?.springBoneManager?.reset();
-    ctx.onClose();
+    ctx.onClose(had && ok !== false);
   }
   ui.close.onclick = close;
   ui.set.onclick = () => { if (S && !S.rendering) ctx.openSettings(); };
   // "⚙ הגדרות" changed: the body track of the whole take is computed again (a few ms).
   function bodyChanged() { if (S && !S.rendering) S.pose.setBody(ctx.bodySettings); }
+  // "🎤 קול" changed: the take's sound is processed again (voice.js); playback goes on from the same point.
+  async function voiceNow() {
+    if (!S?.raw) return;
+    const key = voiceKey(ctx.voiceSettings);
+    if (key === S.voiceKey) return;
+    const s0 = S, buf = await processVoice(S.raw, ctx.voiceSettings);
+    if (S !== s0) return;
+    S.buffer = buf; S.voiceKey = key;
+    if (S.playing) { pause(); play(); }
+  }
+  let voiceTimer = null;
+  function voiceChanged() { clearTimeout(voiceTimer); voiceTimer = setTimeout(() => voiceNow().catch((e) => console.warn("voice", e)), 250); }
 
   // ---- saving (debounced) and undo ------------------------------------------------------------------------------
   let saveTimer = null;
@@ -87,13 +108,27 @@ export function createEditor(ctx) {
     S.edit.updated = Date.now();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(flushSave, 400);
+    showSaved("dirty");
     draw();
   }
+  // -> Promise: true saved, false failed, undefined nothing to save.
   function flushSave() {
-    if (!S || saveTimer === null) return;
+    if (!S || saveTimer === null) return Promise.resolve();
     clearTimeout(saveTimer); saveTimer = null;
     S.rec.edit = structuredClone(S.edit);
-    ctx.putTake(S.rec).catch((e) => { console.error(e); ctx.say("לא הצלחתי לשמור את העריכה.", true); });
+    showSaved("saving");
+    const s0 = S;
+    return ctx.putTake(S.rec).then(() => { if (S === s0) showSaved("saved"); return true; })
+      .catch((e) => { console.error(e); if (S === s0) showSaved("fail"); ctx.say("לא הצלחתי לשמור את הטיוטה (אין מקום בטלפון?).", true); return false; });
+  }
+  // The save state in the bar: new (nothing edited yet), dirty, saving, saved (with the time), fail.
+  function showSaved(state) {
+    const t = S?.rec.edit?.updated ? new Date(S.rec.edit.updated).toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" }) : "";
+    const text = { new: "טיוטה חדשה", dirty: "• שומר…", saving: "• שומר…", saved: "✓ נשמר", fail: "⚠ לא נשמר" }[state];
+    ui.saved.textContent = text;
+    ui.saved.dataset.state = state;
+    ui.saved.title = t ? `נשמר בטלפון ${t}` : "";
+    if (window.__rec) window.__rec.draftState = state;
   }
   const snap = () => JSON.stringify(S.edit);
   ui.undo.onclick = () => {
@@ -296,7 +331,7 @@ export function createEditor(ctx) {
     input.dir = "ltr";
     let before = null;
     input.onpointerdown = () => { before = snap(); };
-    input.oninput = () => { if (!before) before = snap(); set(Number(input.value)); S.edit.updated = Date.now(); };
+    input.oninput = () => { if (!before) before = snap(); set(Number(input.value)); S.edit.updated = Date.now(); showSaved("dirty"); };
     input.onchange = () => { changed(before); before = null; };
     const l = el("span", "ed-lbl2", label);
     const r = el("div", "ed-ends");
@@ -356,7 +391,8 @@ export function createEditor(ctx) {
   ui.render.onclick = async () => {
     if (!S) return;
     pause();
-    flushSave();
+    await flushSave();
+    if (!S) return;
     ui.rSheet.hidden = false;
     ui.rBar.hidden = true;
     ui.rGo.hidden = false; ui.rGo.disabled = true;
@@ -407,7 +443,7 @@ export function createEditor(ctx) {
     const t0 = performance.now(), src = S.rec;
     try {
       const res = await renderTake({
-        stage, pose: S.pose, edit: S.edit, take: S.data,
+        stage, pose: S.pose, edit: S.edit, take: S.data, voice: ctx.voiceSettings,
         opts: { ...opts, signal: job, onProgress: ({ frame, frames, fps }) => {
           ui.rFill.style.width = `${(100 * frame / frames).toFixed(1)}%`;
           const left = (frames - frame) / Math.max(0.1, fps) * 1000;
@@ -423,6 +459,10 @@ export function createEditor(ctx) {
       };
       window.__rec.lastRender = { ...rec.render, bytes: res.blob.size, frames: res.frames, ms: res.ms };
       await ctx.storeTake(rec);
+      // the draft is now exported (until it changes again): the takes list moves it out of "טיוטות"
+      src.exported = S.edit.updated || at;
+      src.edit = structuredClone(S.edit);
+      await ctx.putTake(src).catch((e) => console.warn("mark exported", e));
       ui.rSheet.hidden = true;
       ctx.openResult(rec);
     } catch (e) {
@@ -439,6 +479,6 @@ export function createEditor(ctx) {
     }
   };
 
-  const api = { open, close, tick, bodyChanged, get active() { return !!S; }, get rendering() { return !!S?.rendering; }, get state() { return S; } };
+  const api = { open, close, tick, bodyChanged, voiceChanged, flushSave, get active() { return !!S; }, get rendering() { return !!S?.rendering; }, get state() { return S; } };
   return api;
 }

@@ -42,8 +42,9 @@ function collect(rec, fallbackType) {
 // time base of the performance file), stop() ends the take, done resolves
 // {video: {blob, type, startMs}, audio: {blob, type, startMs} | null, ms}. startMs = the recorder's own start event
 // relative to t0. Stops by itself after maxMs. onTick(elapsedMs) ~4 times a second.
-// separateAudio: also record the audio track alone (live takes; a replay re-record already has its audio in the file).
-export function startRecording(canvas, audioTrack, { maxMs, onTick, separateAudio = false } = {}) {
+// separateAudio: also record an audio track alone (live takes; a replay re-record already has its audio in the file):
+// rawTrack when given (the mic before the voice changer, so the voice can be changed later), else audioTrack.
+export function startRecording(canvas, audioTrack, { maxMs, onTick, separateAudio = false, rawTrack = null } = {}) {
   const type = pickType();
   if (type === null) throw new Error("no-recorder");
   // captureStream(0) = only on requestFrame(); where requestFrame is missing, captureStream() takes a frame
@@ -56,9 +57,10 @@ export function startRecording(canvas, audioTrack, { maxMs, onTick, separateAudi
   const videoDone = collect(rec, type || "video/webm");
 
   let arec = null, aStream = null, audioDone = Promise.resolve(null);
-  if (separateAudio && audioTrack) {
+  const sepTrack = rawTrack || audioTrack;
+  if (separateAudio && sepTrack) {
     const at = pickAudioType();
-    aStream = new MediaStream([audioTrack.clone()]);
+    aStream = new MediaStream([sepTrack.clone()]);
     arec = new MediaRecorder(aStream, { ...(at ? { mimeType: at } : {}), audioBitsPerSecond: 128_000 });
     audioDone = collect(arec, at || "audio/webm");
   }

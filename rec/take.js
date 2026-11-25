@@ -14,8 +14,8 @@
 //                                                   order], matrix[16] (MediaPipe facialTransformationMatrix, column-major)
 //       "render"   Float64[render.count]            render frame times, ms since t0 (one video frame each)
 //       "audio"    raw bytes of the mic recording (header.audio.type), when there was a mic
-import { MAPPING } from "./mapping.js?v=5";
-import { STEP_MS, OUT_LEN } from "./body.js?v=5";
+import { MAPPING } from "./mapping.js?v=6";
+import { STEP_MS, OUT_LEN } from "./body.js?v=6";
 const clampN = (v, a, b) => Math.min(b, Math.max(a, v));
 
 const MAGIC = "ELIRANPF", VERSION = 1;
@@ -70,6 +70,7 @@ export class TakeWriter {
       start: this.start,                 // FaceRig.snapshot(t0): One Euro state, held values, head, calibration, mirror
       settings: this.info.settings,      // at the start: mirror, framing, calibration
       body: this.info.body,              // body.js settings while recording (for reference: replay/render use the current ones)
+      voice: this.info.voice,            // voice.js settings while recording (the audio section is the raw mic)
       events: this.events,               // [{t, at, type: "mirror"|"calib"|"frame", ...}]
       mapping: MAPPING,
       model: this.info.model,

@@ -15,7 +15,7 @@
 // It runs on a fixed 1/60 s step, so it acts the same at any frame rate and the editor/offline render can compute it
 // over a whole take (take.js PoseTrack) with the same code. Write order every frame: FaceRig.writeBones() (neck/head),
 // then BodyRig.write() (overwrites the spine, adds to neck/head, sets chest/arms and the model's offset/scale).
-import { ARM_DOWN, ELBOW } from "./avatar.js?v=5";
+import { ARM_DOWN, ELBOW } from "./avatar.js?v=6";
 
 export const STEP_MS = 1000 / 60;
 const DT = STEP_MS / 1000, TAU = Math.PI * 2, D2R = Math.PI / 180;
@@ -181,3 +181,24 @@ export class BodyRig {
     this.stage.setBody({ x: o[O.x], y: o[O.y], sx: o[O.sx], sy: o[O.sy] });
   }
 }
+
+// ---- presets ("פריסטים" at the top of "🕺 תנועה", kept in localStorage; "ייצא" / "ייבא" a JSON file as a backup) ----
+// {version: 1, active: name | null, list: [{name, at, body}]}. active = the preset last applied or saved; the sheet
+// marks it changed ("•") when the current settings differ from it.
+const PKEY = "eliran-rec-presets";
+export const PRESET_FILE = "eliran-rec-presets";
+export function checkPresets(p) {
+  const out = { version: 1, active: null, list: [] };
+  if (!p || typeof p !== "object" || !Array.isArray(p.list)) return out;
+  for (const x of p.list) {
+    if (!x || typeof x.name !== "string" || !x.name.trim()) continue;
+    const name = x.name.trim().slice(0, 40);
+    if (out.list.some((y) => y.name === name)) continue;
+    out.list.push({ name, at: Number(x.at) || Date.now(), body: checkSettings(x.body) });
+  }
+  out.active = out.list.some((y) => y.name === p.active) ? p.active : null;
+  return out;
+}
+export function loadPresets() { try { return checkPresets(JSON.parse(localStorage.getItem(PKEY))); } catch { return checkPresets(null); } }
+export function savePresets(p) { try { localStorage.setItem(PKEY, JSON.stringify(p)); return true; } catch { return false; } }
+export const sameSettings = (a, b) => JSON.stringify(checkSettings(a)) === JSON.stringify(checkSettings(b));

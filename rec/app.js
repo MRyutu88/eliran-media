@@ -3,17 +3,18 @@
 // (play, share, save, delete) -> "נגן מחדש" drives Eliran from the file, and can record that to a new video ->
 // "ערוך" opens the timeline editor on the take (editor.js), which renders the edit offline to an MP4 (render.js).
 // Text in Hebrew; values from files are set with textContent.
-import { createStage } from "./avatar.js?v=5";
-import { createTracker } from "./tracking.js?v=5";
-import { FaceRig } from "./mapping.js?v=5";
-import { startRecording, pickType, frameDrawn } from "./recorder.js?v=5";
-import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=5";
-import { createEditor } from "./editor.js?v=5";
-import { BodyRig, GROUPS, DEFAULTS, loadSettings, saveSettings } from "./body.js?v=5";
+import { createStage } from "./avatar.js?v=6";
+import { createTracker } from "./tracking.js?v=6";
+import { FaceRig } from "./mapping.js?v=6";
+import { startRecording, pickType, frameDrawn } from "./recorder.js?v=6";
+import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=6";
+import { createEditor } from "./editor.js?v=6";
+import { BodyRig, GROUPS, DEFAULTS, loadSettings, saveSettings, loadPresets, savePresets, checkPresets, checkSettings, sameSettings, PRESET_FILE } from "./body.js?v=6";
+import { VOICE_PRESETS, VOICE_DEFAULTS, checkVoice, loadVoice, saveVoice, applyPreset, presetOf, processVoice, createLiveVoice, workletSupported } from "./voice.js?v=6";
 
 // Must match <meta name="rec-version"> in index.html. A different value = the phone mixed cached files from two
 // versions: reload once with a fresh URL (index.html then comes fresh and asks for matching files).
-const REC_VERSION = "5";
+const REC_VERSION = "6";
 if (document.querySelector('meta[name="rec-version"]')?.content !== REC_VERSION) {
   const key = "rec-reload-" + REC_VERSION;
   if (!sessionStorage.getItem(key)) {
@@ -31,6 +32,7 @@ const ui = {
   micRetry: $("mic-retry"), mirror: $("t-mirror"), showCam: $("t-cam"), fBody: $("f-body"), fClose: $("f-close"),
   calib: $("calib"), swap: $("swap"), takesBtn: $("takes-btn"), setBtn: $("set-btn"),
   set: $("settings"), setList: $("set-list"), setClose: $("set-close"), setReset: $("set-reset"),
+  tabBody: $("tab-body"), tabVoice: $("tab-voice"), presetInput: $("preset-input"), resultNote: $("result-note"),
   result: $("result"), playback: $("playback"), meta: $("meta"), share: $("share"), save: $("save"), savePerf: $("save-perf"),
   resultReplay: $("result-replay"), resultEdit: $("result-edit"), again: $("again"),
   takes: $("takes"), takesList: $("takes-list"), takesClose: $("takes-close"), takesNote: $("takes-note"),
@@ -82,10 +84,14 @@ let take = null, liveRec = null; // the take being recorded: TakeWriter + record
 let rp = null;                   // replay state (startReplay)
 let body = null;                 // BodyRig (body.js) on the loaded model, for live and replay
 const bodySettings = loadSettings(); // "⚙ הגדרות"; changed in place, so every rig that holds it sees changes at once
+const voiceSettings = loadVoice();   // "⚙ הגדרות" -> "🎤 קול" (voice.js); also changed in place
+let presets = loadPresets();         // motion presets (body.js)
+let liveVoice = null;                // the live mic chain (voice.js createLiveVoice): its track goes into the video
+let monitorOn = false;               // "🎧 לשמוע בזמן אמת"
 const stats = { frames: 0, dets: 0, detMs: 0, t: performance.now(), face: false };
 // For local tests. __rec.trace = [] collects {src, t, target, head} after every face update (live while recording,
 // and in replay), to compare the two.
-window.__rec = { stage, get body() { return body; }, bodySettings, get rig() { return rig; }, get tracker() { return tracker; }, get replay() { return rp; }, stats, trace: null };
+window.__rec = { stage, get body() { return body; }, bodySettings, voiceSettings, get presets() { return presets; }, get liveVoice() { return liveVoice; }, get rig() { return rig; }, get tracker() { return tracker; }, get replay() { return rp; }, stats, trace: null };
 const trace = (src, r, t) => window.__rec.trace?.push({ src, t, target: { ...r.target }, head: { ...r.head } });
 
 async function loadModel(blob, name) {
@@ -138,14 +144,28 @@ function deviceError(device, e) {
   return `לא הצלחתי להפעיל ${device === "camera" ? "את המצלמה" : "את המיקרופון"} (${name}).`;
 }
 let micError = null;
+// The mic without echo cancellation and auto gain (both colour the voice; the level is set in voice.js), noise
+// suppression as set in "🎤 קול". Then the live chain (voice changer + clean-up) for the recorded video.
+const micTrack = () => media?.getAudioTracks()[0] ?? null;
 async function openMic() {
+  for (const t of media.getAudioTracks()) { t.stop(); media.removeTrack(t); }
+  liveVoice?.close(); liveVoice = null;
   try {
-    const a = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const a = await navigator.mediaDevices.getUserMedia({ audio: {
+      echoCancellation: false, autoGainControl: false, noiseSuppression: voiceSettings.clean, channelCount: 1 } });
     for (const t of a.getAudioTracks()) media.addTrack(t);
     micError = null;
   } catch (e) {
     console.warn("mic", e);
     micError = e;
+  }
+  if (micTrack()) {
+    try {
+      actx ??= new AudioContext();
+      await actx.resume();
+      liveVoice = await createLiveVoice(actx, micTrack(), voiceSettings);
+      liveVoice.monitor(monitorOn);
+    } catch (e) { console.warn("live voice chain", e); liveVoice = null; }
   }
   showMicState();
 }
@@ -235,6 +255,7 @@ function takeInfo() {
   return {
     settings: { mirror: rig.mirror, framing: stage.framing, calibration: { offset: { ...rig.offset }, base: { ...rig.base }, offsetPos: rig.offsetPos && { ...rig.offsetPos } } },
     body: JSON.parse(JSON.stringify(bodySettings)),
+    voice: { ...JSON.parse(JSON.stringify(voiceSettings)), live: !!liveVoice?.fx },
     model: modelInfo,
     tracker: { lib: "@mediapipe/tasks-vision@1.2.3", delegate: tracker?.delegate, video: { w: ui.cam.videoWidth, h: ui.cam.videoHeight } },
     stage: { w: ui.view.width, h: ui.view.height, fov: stage.camera.fov, framing: stage.framing },
@@ -257,8 +278,9 @@ ui.record.onclick = async () => {
   if (busy || !media || !rig) return;
   let ctl;
   try {
-    ctl = startRecording(ui.view, media.getAudioTracks()[0], {
-      maxMs: MAX_MS, separateAudio: true,
+    // the video gets the processed voice; the performance file the raw mic (so the voice can be changed later)
+    ctl = startRecording(ui.view, liveVoice?.track ?? micTrack(), {
+      maxMs: MAX_MS, separateAudio: true, rawTrack: micTrack(),
       onTick: (ms) => { ui.dot.textContent = `● ${fmt(ms)} / ${fmt(MAX_MS)}`; ui.record.textContent = `■ עצור (${fmt(ms)})`; },
     });
   } catch (e) {
@@ -340,6 +362,9 @@ function openResult(t) {
   ui.save.download = f.name;
   ui.meta.textContent = isolate([t.name, fmt(t.ms), `${(t.video.size / 1e6).toFixed(1)}MB`, t.audio ? "" : "בלי קול", t.videoType]);
   ui.share.hidden = !(navigator.canShare && navigator.canShare({ files: [f] }));
+  ui.resultNote.textContent = t.kind === "render"
+    ? "✓ הסרטון הערוך נשמר ב-🎞 הקלטות. הטיוטה נשארת: אפשר לחזור לערוך ולרנדר שוב."
+    : "✓ ההקלטה נשמרה ב-🎞 הקלטות (הגולמי, עם קובץ הביצוע). אפשר לערוך עכשיו או לחזור אליה אחר כך, ולרנדר רק כשמוכנים.";
   ui.result.hidden = false;
   ui.playback.play().catch(() => {});
   window.__rec.last = { size: t.video.size, type: t.videoType, ms: t.ms, name: f.name };
@@ -359,22 +384,45 @@ function btn(text, fn, cls = "") {
   b.textContent = text; b.onclick = fn; if (cls) b.className = cls;
   return b;
 }
+// A draft = a take with an edit that was not rendered since its last change (editor.js sets `exported` on render).
+const isDraft = (t) => t.kind !== "render" && !!t.edit && !(t.exported >= (t.edit.updated || 0));
+async function countDrafts() {
+  let n = 0;
+  try { n = (await allTakes()).filter(isDraft).length; } catch { /* label only */ }
+  ui.takesBtn.textContent = n ? `🎞 הקלטות (📝 ${n})` : "🎞 הקלטות";
+  return n;
+}
 async function renderTakes() {
   let list = [];
   try { list = await allTakes(); } catch (e) { console.error(e); }
   ui.takesList.replaceChildren();
-  ui.takesNote.textContent = list.length ? `${list.length} הקלטות, שמורות רק בדפדפן הזה בטלפון.` : "אין עדיין הקלטות.";
-  for (const t of list) {
+  const drafts = list.filter(isDraft).sort((a, b) => (b.edit.updated || 0) - (a.edit.updated || 0)), rest = list.filter((t) => !isDraft(t));
+  ui.takesNote.textContent = list.length ? `${list.length} הקלטות, שמורות רק בדפדפן הזה בטלפון.${drafts.length ? ` ${drafts.length} טיוטות שעוד לא רונדרו.` : ""}` : "אין עדיין הקלטות.";
+  const heading = (text) => { const h = document.createElement("h2"); h.textContent = text; ui.takesList.append(h); };
+  if (drafts.length) heading("📝 טיוטות (עריכה שעוד לא יצאה לווידאו)");
+  drafts.forEach((t) => takeItem(t, true));
+  if (drafts.length && rest.length) heading("כל ההקלטות");
+  rest.forEach((t) => takeItem(t, false));
+  countDrafts();
+}
+function takeItem(t, draft) {
+  {
     const li = document.createElement("li"), head = document.createElement("div"), name = document.createElement("b");
     const meta = document.createElement("span"), row = document.createElement("div");
     name.textContent = t.name;
+    if (draft || (t.edit && t.kind !== "render")) {
+      const b = document.createElement("span"); b.className = "badge" + (draft ? "" : " done");
+      b.textContent = draft ? "📝 טיוטה" : "✓ יצא לווידאו";
+      name.append(b);
+    }
+    if (draft) li.className = "draft";
     meta.textContent = isolate([niceDate(t.at), fmt(t.ms), t.audio ? "" : "בלי קול",
-      t.kind === "render" && t.render ? `ערוך ${t.render.h}p${t.render.fps}` : t.edit ? "יש עריכה" : ""]);
+      t.kind === "render" && t.render ? `ערוך ${t.render.h}p${t.render.fps}` : draft ? `נערך ${niceDate(t.edit.updated || t.at)}` : ""]);
     head.append(name, meta);
     row.className = "chips";
     row.append(
       btn("▶ צפה", () => { ui.takes.hidden = true; openResult(t); }),
-      btn("✂ ערוך", () => { ui.takes.hidden = true; openEditor(t); }),
+      btn(draft ? "✂ המשך לערוך" : t.edit && t.kind !== "render" ? "✂ ערוך שוב" : "✂ ערוך", () => { ui.takes.hidden = true; openEditor(t); }),
       btn("↻ נגן מחדש", () => { ui.takes.hidden = true; startReplay(t); }),
       btn("שתף", () => shareTake(t)),
       btn("שמור וידאו", () => download(t.video, videoFile(t).name)),
@@ -409,7 +457,7 @@ async function startReplay(t) {
     try {
       actx ??= new AudioContext();
       await actx.resume();
-      rp.buffer = await actx.decodeAudioData(await data.audio.arrayBuffer());
+      rp.buffer = await processVoice(await actx.decodeAudioData(await data.audio.arrayBuffer()), voiceSettings);
       rp.dest = actx.createMediaStreamDestination();
     } catch (e) { console.warn("replay audio", e); rp.buffer = null; }
   }
@@ -508,64 +556,290 @@ function stopReplay() {
 const editor = createEditor({
   stage,
   getAudio: () => (actx ??= new AudioContext()),
-  putTake, storeTake, openResult, say, bodySettings, openSettings,
-  onClose: () => { if (media) keepAwake(); },
+  putTake, storeTake, openResult, say, bodySettings, voiceSettings, openSettings,
+  onClose: (saved) => {
+    if (media) keepAwake();
+    countDrafts();
+    if (saved) { say("📝 הטיוטה נשמרה. חוזרים אליה מ-🎞 הקלטות, ומרנדרים כשמוכנים."); setTimeout(() => say(""), 3500); }
+  },
 });
-// ---- settings ("⚙ הגדרות": the body extras of body.js) ---------------------------------------------------------
+// ---- settings ("⚙ הגדרות"): two tabs. "🕺 תנועה" = motion presets + the body extras (body.js); "🎤 קול" = voice.js ----
 // A bottom sheet, so Eliran stays visible above it while tuning. Every change applies at once (live, replay, editor)
-// and is kept in localStorage. Not recorded in takes: replay/editor/render always use the current settings.
-let setTimer = null;
+// and is kept in localStorage. Not take events: replay/editor/render always use the current settings.
+let setTimer = null, setTab = "body";
+const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+function section(title, hint) {
+  const box = mk("section"), top = mk("div", "set-top");
+  top.append(mk("b", "", title));
+  box.append(top);
+  if (hint) box.append(mk("p", "", hint));
+  return box;
+}
+function slider(box, label, min, max, step, value, onInput, show) {
+  const row = mk("label", "set-row"), input = mk("input"), val = mk("output");
+  Object.assign(input, { type: "range", min, max, step, value });
+  const paint = () => { val.textContent = show(Number(input.value)); };
+  input.oninput = () => { onInput(Number(input.value)); paint(); };
+  paint();
+  row.append(mk("span", "", label), input, val);
+  box.append(row);
+  return input;
+}
 function settingsChanged() {
   saveSettings(bodySettings);
   clearTimeout(setTimer);
   setTimer = setTimeout(() => editor.bodyChanged(), 150); // the editor recomputes its body track
+  paintPresets();
 }
-function buildSettings() {
-  ui.setList.replaceChildren();
+
+// -- motion presets (body.js loadPresets/savePresets): tap = apply; the active one shows "•" once changed ----------
+let presetBox = null;
+function paintPresets() { if (presetBox?.isConnected) fillPresets(presetBox); }
+function storePresets() {
+  if (!savePresets(presets)) say("לא הצלחתי לשמור את הפריסטים בדפדפן.", true);
+  paintPresets();
+}
+function fillPresets(box) {
+  box.replaceChildren();
+  const top = mk("div", "set-top");
+  top.append(mk("b", "", "💾 פריסטים"));
+  box.append(top);
+  const cur = presets.list.find((p) => p.name === presets.active);
+  const dirty = !!cur && !sameSettings(cur.body, bodySettings);
+  box.append(mk("p", "", !presets.list.length ? "שומרים את ההגדרות של עכשיו בשם, וחוזרים אליהן בלחיצה."
+    : cur ? (dirty ? `שינית מאז "${cur.name}". "עדכן" שומר את השינויים בתוכו, או לחיצה על פריסט מחזירה אותו.` : `פעיל: "${cur.name}" ✓`)
+    : "לחיצה על פריסט מחזירה את ההגדרות שלו."));
+  if (presets.list.length) {
+    const row = mk("div", "chips");
+    for (const p of presets.list) {
+      const b = btn(p.name, () => applyBodyPreset(p.name), p.name === presets.active && dirty ? "dirty" : "");
+      b.setAttribute("aria-pressed", String(p.name === presets.active));
+      row.append(b);
+    }
+    box.append(row);
+  }
+  const act = mk("div", "chips");
+  act.append(btn("+ שמור כפריסט חדש", savePresetNew));
+  if (cur) {
+    const up = btn(`⟳ עדכן את "${cur.name}"`, () => { cur.body = checkSettings(bodySettings); cur.at = Date.now(); storePresets(); say("הפריסט עודכן ✓"); setTimeout(() => say(""), 1500); });
+    up.disabled = !dirty;
+    act.append(up,
+      btn("✎ שם", () => {
+        const n = prompt("שם חדש לפריסט:", cur.name)?.trim().slice(0, 40);
+        if (!n || n === cur.name) return;
+        if (presets.list.some((p) => p.name === n)) { alert(`כבר יש פריסט בשם "${n}".`); return; }
+        cur.name = n; presets.active = n; storePresets();
+      }),
+      btn("🗑 מחק", () => {
+        if (!confirm(`למחוק את הפריסט "${cur.name}"? ההגדרות של עכשיו לא משתנות.`)) return;
+        presets.list = presets.list.filter((p) => p !== cur); presets.active = null; storePresets();
+      }, "danger"));
+  }
+  act.append(btn("⇩ גיבוי לקובץ", exportPresets), btn("⇧ טען מקובץ", () => ui.presetInput.click()));
+  box.append(act);
+}
+function applyBodyPreset(name) {
+  const p = presets.list.find((x) => x.name === name);
+  if (!p) return;
+  const d = checkSettings(p.body);
+  for (const k of Object.keys(d)) bodySettings[k] = d[k];
+  presets.active = name;
+  savePresets(presets);
+  settingsChanged();
+  buildSettings();
+}
+function savePresetNew() {
+  const name = prompt("שם לפריסט:", `פריסט ${presets.list.length + 1}`)?.trim().slice(0, 40);
+  if (!name) return;
+  const i = presets.list.findIndex((x) => x.name === name);
+  if (i >= 0 && !confirm(`כבר יש פריסט בשם "${name}". להחליף אותו בהגדרות של עכשיו?`)) return;
+  const entry = { name, at: Date.now(), body: checkSettings(bodySettings) };
+  if (i >= 0) presets.list[i] = entry; else presets.list.push(entry);
+  presets.active = name;
+  storePresets();
+  say(`נשמר: "${name}" ✓`); setTimeout(() => say(""), 1500);
+}
+// The backup file: every motion preset + the current voice settings.
+function exportPresets() {
+  const file = { format: PRESET_FILE, version: 1, saved: new Date().toISOString(), active: presets.active, list: presets.list, voice: { ...voiceSettings } };
+  download(new Blob([JSON.stringify(file, null, 2)], { type: "application/json" }), `${PRESET_FILE}-${stamp()}.json`);
+}
+ui.presetInput.onchange = async () => {
+  const f = ui.presetInput.files?.[0];
+  ui.presetInput.value = "";
+  if (!f) return;
+  let j;
+  try { j = JSON.parse(await f.text()); } catch { j = null; }
+  if (!j || j.format !== PRESET_FILE) { say("זה לא קובץ פריסטים של הדף הזה.", true); setTimeout(() => say(""), 3000); return; }
+  if (j.version > 1) { say("הקובץ נשמר בגרסה חדשה יותר של הדף. לרענן את הדף.", true); return; }
+  const inc = checkPresets(j);
+  for (const p of inc.list) {
+    const i = presets.list.findIndex((x) => x.name === p.name);
+    if (i >= 0) presets.list[i] = p; else presets.list.push(p);
+  }
+  if (j.voice && confirm("בקובץ יש גם הגדרות קול. לטעון גם אותן?")) {
+    const v = checkVoice(j.voice), clean = voiceSettings.clean;
+    Object.assign(voiceSettings, v);
+    voiceChanged();
+    if (v.clean !== clean) reopenMic();
+  }
+  storePresets();
+  buildSettings();
+  say(`נטענו ${inc.list.length} פריסטים ✓`); setTimeout(() => say(""), 2000);
+};
+
+function buildBody(list) {
+  presetBox = mk("section", "presets");
+  fillPresets(presetBox);
+  list.append(presetBox);
   for (const g of GROUPS) {
-    const st = bodySettings[g.key], box = document.createElement("section");
-    const top = document.createElement("div"); top.className = "set-top";
-    const name = document.createElement("b"); name.textContent = g.name;
-    const on = document.createElement("button"); on.className = "set-on";
+    const st = bodySettings[g.key], box = section(g.name, g.hint);
+    const on = mk("button", "set-on");
     const paint = () => {
       on.setAttribute("aria-pressed", String(st.on)); on.textContent = st.on ? "פועל" : "כבוי";
       box.classList.toggle("off", !st.on);
     };
     on.onclick = () => { st.on = !st.on; paint(); settingsChanged(); };
-    top.append(name, on);
-    const hint = document.createElement("p"); hint.textContent = g.hint;
-    box.append(top, hint);
+    box.firstChild.append(on);
     for (const [key, label, min, max, stepV] of g.sliders) {
-      const row = document.createElement("label"); row.className = "set-row";
-      const l = document.createElement("span"); l.textContent = label;
-      const input = document.createElement("input");
-      Object.assign(input, { type: "range", min, max, step: stepV, value: st[key] });
+      const input = slider(box, label, min, max, stepV, st[key], (v) => { st[key] = v; settingsChanged(); }, (v) => `${Math.round(v * 100)}%`);
       input.dataset.key = `${g.key}.${key}`;
-      const val = document.createElement("output");
-      const show = () => { val.textContent = `${Math.round(st[key] * 100)}%`; };
-      input.oninput = () => { st[key] = Number(input.value); show(); settingsChanged(); };
-      show();
-      row.append(l, input, val);
-      box.append(row);
     }
     for (const [key, label] of g.switches || []) {
-      const b = document.createElement("button"); b.className = "set-sw";
+      const b = mk("button", "set-sw");
       const p2 = () => { b.setAttribute("aria-pressed", String(st[key])); b.textContent = (st[key] ? "✓ " : "") + label; };
       b.onclick = () => { st[key] = !st[key]; p2(); settingsChanged(); };
       p2();
       box.append(b);
     }
     paint();
-    ui.setList.append(box);
+    list.append(box);
   }
 }
-function openSettings() { buildSettings(); ui.set.hidden = false; }
-ui.setBtn.onclick = openSettings;
+
+// -- voice ("🎤 קול", voice.js) ------------------------------------------------------------------------------------------
+function voiceChanged() {
+  voiceSettings.preset = presetOf(voiceSettings);
+  saveVoice(voiceSettings);
+  liveVoice?.update(voiceSettings);
+  editor.voiceChanged(); // the editor processes the take's sound again
+}
+async function reopenMic() {
+  if (!media || liveRec || busy) return;
+  busy = true;
+  await openMic();
+  busy = false;
+}
+const semis = (v) => (v > 0 ? `+${v}` : `${v}`);
+const vtest = { rec: null, raw: null, src: null, busy: false }; // "🎙 ניסיון": 5 s of raw mic, played with the voice
+async function voiceTestPlay() {
+  if (!vtest.raw || vtest.busy) return;
+  vtest.busy = true;
+  try {
+    try { vtest.src?.stop(); } catch { /* ended */ }
+    const buf = await processVoice(vtest.raw, voiceSettings);
+    const s = actx.createBufferSource();
+    s.buffer = buf; s.connect(actx.destination); s.start();
+    vtest.src = s;
+  } catch (e) { console.warn("voice test", e); say("לא הצלחתי להשמיע את הניסיון.", true); }
+  vtest.busy = false;
+}
+function voiceTestRecord() {
+  if (vtest.rec) { vtest.rec.stop(); return; }
+  if (!micTrack()) { say("צריך קודם \"הפעל מצלמה ומיקרופון\" (ושהמיקרופון יעבוד).", true); setTimeout(() => say(""), 3000); return; }
+  const stream = new MediaStream([micTrack().clone()]), chunks = [];
+  const r = new MediaRecorder(stream);
+  r.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  r.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    vtest.rec = null;
+    try {
+      actx ??= new AudioContext(); await actx.resume();
+      vtest.raw = await actx.decodeAudioData(await new Blob(chunks, { type: r.mimeType }).arrayBuffer());
+      window.__rec.voiceTest = { secs: vtest.raw.duration };
+    } catch (e) { console.warn("voice test decode", e); }
+    if (setTab === "voice" && !ui.set.hidden) buildSettings();
+    voiceTestPlay();
+  };
+  r.start();
+  vtest.rec = r;
+  setTimeout(() => { if (r.state !== "inactive") r.stop(); }, 5000);
+  buildSettings();
+}
+function buildVoice(list) {
+  const fx = workletSupported();
+  const box = section("🎤 הקול בווידאו", fx
+    ? "הקול משתנה בכל וידאו: בהקלטה, ב\"נגן מחדש\" וברנדר. קובץ הביצוע שומר את הקול המקורי, אז אפשר להחליף קול גם אחרי שהקלטת ולרנדר שוב."
+    : "הדפדפן הזה לא יודע לשנות קול (אין AudioWorklet), אז הקול יוצא מקורי. לנסות ב-Chrome מעודכן.");
+  const row = mk("div", "chips"), cur = presetOf(voiceSettings);
+  for (const p of VOICE_PRESETS) {
+    const b = btn(p.name, () => { applyPreset(voiceSettings, p.id); voiceChanged(); buildSettings(); });
+    b.setAttribute("aria-pressed", String(cur === p.id));
+    row.append(b);
+  }
+  if (cur === "custom") { const b = mk("button", "", "מותאם"); b.setAttribute("aria-pressed", "true"); b.disabled = true; row.append(b); }
+  box.append(row);
+  const knobs = mk("div");
+  knobs.style.cssText = "display:flex;flex-direction:column;gap:4px";
+  if (!voiceSettings.on) knobs.style.opacity = ".4";
+  const turnOn = () => { if (!voiceSettings.on) { voiceSettings.on = true; knobs.style.opacity = ""; } };
+  const mark = () => { const p = presetOf(voiceSettings); row.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(VOICE_PRESETS[i]?.id === p))); };
+  slider(knobs, "גובה", -12, 12, 1, voiceSettings.pitch, (v) => { turnOn(); voiceSettings.pitch = v; voiceChanged(); mark(); }, semis).dataset.key = "voice.pitch";
+  slider(knobs, "גוון", -6, 6, 1, voiceSettings.formant, (v) => { turnOn(); voiceSettings.formant = v; voiceChanged(); mark(); }, semis).dataset.key = "voice.formant";
+  knobs.append(mk("p", "", "גובה = כמה גבוה הקול (חצאי טונים). גוון = \"גודל\" הגרון: למעלה קטן ומצויר, למטה גדול. שניהם יחד מרחיקים מהקול האמיתי."));
+  const rb = mk("button", "set-sw");
+  const paintRb = () => { rb.setAttribute("aria-pressed", String(voiceSettings.robot)); rb.textContent = (voiceSettings.robot ? "✓ " : "") + "🤖 רובוטי (טון אחד קבוע)"; };
+  rb.onclick = () => { turnOn(); voiceSettings.robot = !voiceSettings.robot; voiceChanged(); buildSettings(); };
+  paintRb();
+  knobs.append(rb);
+  if (voiceSettings.robot) slider(knobs, "טון", 60, 300, 5, voiceSettings.robotHz, (v) => { voiceSettings.robotHz = v; voiceChanged(); }, (v) => `${v}Hz`);
+  box.append(knobs);
+  list.append(box);
+
+  const test = section("🎧 לשמוע איך זה נשמע", "מקליטים 5 שניות ושומעים אותן עם הקול שנבחר. אחרי שינוי בהגדרות, \"השמע שוב\".");
+  const tr = mk("div", "chips");
+  const recB = btn(vtest.rec ? "■ עצור" : "🎙 הקלט ניסיון (5 ש׳)", voiceTestRecord);
+  recB.disabled = !!liveRec;
+  const playB = btn("▶ השמע שוב", voiceTestPlay);
+  playB.disabled = !vtest.raw;
+  const monB = btn((monitorOn ? "✓ " : "") + "🎧 בזמן אמת", () => { monitorOn = !monitorOn; liveVoice?.monitor(monitorOn); buildSettings(); });
+  monB.setAttribute("aria-pressed", String(monitorOn));
+  monB.disabled = !liveVoice;
+  tr.append(recB, playB, monB);
+  test.append(tr, mk("p", "set-note", "\"בזמן אמת\" רק עם אוזניות: בלי אוזניות הרמקול נכנס חזרה למיקרופון."));
+  list.append(test);
+
+  const q = section("✨ איכות הסאונד", "בכל ייצוא הקול מנוקה ומאוזן: מסנן רעש נמוך (רעידות, מזגן), דחיסה עדינה, עוצמה אחידה וחזקה (כמו בפודקאסט) ובלי עיוותים בשיא.");
+  const cl = mk("button", "set-sw");
+  cl.setAttribute("aria-pressed", String(voiceSettings.clean));
+  cl.textContent = (voiceSettings.clean ? "✓ " : "") + "ניקוי רעשי רקע במיקרופון";
+  cl.onclick = async () => { voiceSettings.clean = !voiceSettings.clean; saveVoice(voiceSettings); buildSettings(); await reopenMic(); };
+  cl.disabled = !!liveRec;
+  q.append(cl, mk("p", "set-note", "כבוי = הקול הכי טבעי בחדר שקט. דולק = פחות רעש רקע ברחוב או ליד מאוורר."));
+  list.append(q);
+}
+
+function buildSettings() {
+  ui.setList.replaceChildren();
+  ui.tabBody.setAttribute("aria-pressed", String(setTab === "body"));
+  ui.tabVoice.setAttribute("aria-pressed", String(setTab === "voice"));
+  if (setTab === "voice") buildVoice(ui.setList); else buildBody(ui.setList);
+}
+function openSettings(tab) { if (tab === "body" || tab === "voice") setTab = tab; buildSettings(); ui.set.hidden = false; }
+ui.setBtn.onclick = () => openSettings();
+ui.tabBody.onclick = () => { setTab = "body"; buildSettings(); };
+ui.tabVoice.onclick = () => { setTab = "voice"; buildSettings(); };
 ui.setClose.onclick = () => { ui.set.hidden = true; };
 ui.setReset.onclick = () => {
-  const d = JSON.parse(JSON.stringify(DEFAULTS));
-  for (const k of Object.keys(d)) bodySettings[k] = d[k];
-  settingsChanged();
+  if (setTab === "voice") {
+    const clean = voiceSettings.clean;
+    Object.assign(voiceSettings, JSON.parse(JSON.stringify(VOICE_DEFAULTS)), { clean });
+    voiceChanged();
+  } else {
+    const d = JSON.parse(JSON.stringify(DEFAULTS));
+    for (const k of Object.keys(d)) bodySettings[k] = d[k];
+    settingsChanged();
+  }
   buildSettings();
 };
 
@@ -643,6 +917,7 @@ window.__recBooted = true; // index.html boot guard
       return;
     }
   }
+  countDrafts();
   if (saved?.blob) await loadModel(saved.blob, saved.name);
   else { say("בפעם הראשונה: בוחרים את קובץ ה-VRM של אלירן. הוא נשאר רק בטלפון ולא עולה לשום מקום."); showMain(ui.pick); }
 })();
