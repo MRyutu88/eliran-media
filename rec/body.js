@@ -15,7 +15,7 @@
 // It runs on a fixed 1/60 s step, so it acts the same at any frame rate and the editor/offline render can compute it
 // over a whole take (take.js PoseTrack) with the same code. Write order every frame: FaceRig.writeBones() (neck/head),
 // then BodyRig.write() (overwrites the spine, adds to neck/head, sets chest/arms and the model's offset/scale).
-import { ARM_DOWN, ELBOW } from "./avatar.js?v=7";
+import { ARM_DOWN, ELBOW } from "./avatar.js?v=8";
 
 export const STEP_MS = 1000 / 60;
 const DT = STEP_MS / 1000, TAU = Math.PI * 2, D2R = Math.PI / 180;

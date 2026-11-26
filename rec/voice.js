@@ -59,7 +59,7 @@ const loaded = new WeakSet();
 async function ensureWorklet(ac) {
   if (loaded.has(ac)) return;
   if (!ac.audioWorklet) throw new Error("no-worklet");
-  await ac.audioWorklet.addModule(new URL("./voice-worklet.js?v=7", import.meta.url));
+  await ac.audioWorklet.addModule(new URL("./voice-worklet.js?v=8", import.meta.url));
   loaded.add(ac);
 }
 export const workletSupported = () => typeof AudioWorkletNode !== "undefined";

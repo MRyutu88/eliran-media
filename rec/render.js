@@ -2,12 +2,15 @@
 // from the performance file (take.js PoseTrack, interpolated), camera/effects/background from the edit (edit.js), one
 // WebGL render per frame, H.264 through WebCodecs VideoEncoder, the take's mic audio as AAC (AudioEncoder), muxed
 // into MP4 with mp4-muxer. Nothing depends on how fast the phone is: a slow phone takes longer, the file is the same.
-// Each frame is composed in 2D (layers.js): background color/image, images behind, Eliran, images in front.
+// Each frame is composed in 2D (layers.js): background color/image/video, images behind, Eliran, images in front.
+// A background video (version 8, video.js) gives the exact frame of each output frame (the render waits for it), and
+// its sound is mixed with the voice (layers.js mixAudio, the same mix the editor plays).
 // Hat physics (spring bones) run on a fixed 1/60 s step from a settled start, so two renders give the same frames.
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
-import { sceneAt, applyScene } from "./edit.js?v=7";
-import { processVoice } from "./voice.js?v=7";
-import { composite } from "./layers.js?v=7";
+import { sceneAt, applyScene } from "./edit.js?v=8";
+import { processVoice } from "./voice.js?v=8";
+import { composite, mixAudio, videoNeeds } from "./layers.js?v=8";
+import { audioOf } from "./video.js?v=8";
 
 const PHYS_DT = 1 / 60, SETTLE = 90; // physics step; steps at the start pose before frame 0 so the hat is at rest
 export const SIZES = { "720": [720, 1280], "1080": [1080, 1920] };
@@ -42,27 +45,34 @@ export async function support() {
 }
 
 // voice = voice.js settings (the sound is processed at render time from the raw mic in the performance file)
-// bitmaps = the edit's decoded images (layers.js, Map id -> ImageBitmap)
+// bitmaps = the edit's decoded images (layers.js, Map id -> ImageBitmap); videos = Map id -> VideoSource (video.js)
 // opts: {size: "720"|"1080", fps: 30|60, ss: 1|2, onProgress({frame, frames, fps}), signal: {cancel}}
 // -> {blob (video/mp4), ms, frames, fps, w, h, codec, audio}
-export async function renderTake({ stage, pose, edit, take, opts, voice, bitmaps }) {
+export async function renderTake({ stage, pose, edit, take, opts, voice, bitmaps, videos }) {
   const [w, h] = SIZES[opts.size] || SIZES["720"], fps = opts.fps || 30, ss = opts.ss || 1;
   const durationMs = take.header.durationMs, frames = Math.max(1, Math.round(durationMs / 1000 * fps));
   const bitrate = Math.round((w * h * fps) * (fps > 30 ? 0.12 : 0.16)); // ~8.8 Mbps 720p60, ~10 Mbps 1080p30
   const vcfg = await pickVideoConfig(w, h, fps, bitrate);
   if (!vcfg) throw new Error("no-h264");
 
-  // ---- audio: the mic file decoded, shifted to the video clock (audio.startMs after t0), cut to the video length
+  // ---- audio: the mic file decoded and processed, plus the background videos' sound, mixed on the take clock
+  // (the voice shifted by audio.startMs after t0), cut to the video length
   let audio = null;
-  if (take.audio) {
-    try {
-      const ac = new OfflineAudioContext(1, 1, 48000);
-      const raw = await ac.decodeAudioData(await take.audio.arrayBuffer());
-      const buf = await processVoice(raw, voice); // the voice changer + clean-up (voice.js), the delay removed
-      const acfg = await pickAudioConfig(buf.sampleRate, buf.numberOfChannels);
-      if (acfg) audio = { buf, ...acfg };
-    } catch (e) { console.warn("render audio", e); }
-  }
+  try {
+    let vbuf = null;
+    if (take.audio) {
+      try {
+        const ac = new OfflineAudioContext(1, 1, 48000);
+        const raw = await ac.decodeAudioData(await take.audio.arrayBuffer());
+        vbuf = await processVoice(raw, voice); // the voice changer + clean-up (voice.js), the delay removed
+      } catch (e) { console.warn("render voice", e); }
+    }
+    const sr = vbuf?.sampleRate || 48000, sounds = new Map();
+    for (const [id, src] of videos || []) if (src?.audio && src.blob) sounds.set(id, await audioOf(src.blob, sr));
+    const buf = mixAudio({ voice: vbuf, voiceStart: take.header.audio?.startMs ?? 0, edit, sounds, lengthMs: frames * 1000 / fps, sampleRate: sr });
+    const acfg = buf && await pickAudioConfig(buf.sampleRate, buf.numberOfChannels);
+    if (acfg) audio = { buf, ...acfg };
+  } catch (e) { console.warn("render audio", e); }
 
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
@@ -107,7 +117,9 @@ export async function renderTake({ stage, pose, edit, take, opts, voice, bitmaps
         vrm.humanoid.update(); vrm.expressionManager?.update(); vrm.nodeConstraintManager?.update();
       }
       stage.renderer.render(stage.scene, stage.camera);
-      composite(g, w, h, edit, t, gl, bitmaps); // ss = 2: Eliran scaled down, each output pixel = 2x2 rendered pixels
+      for (const n of videoNeeds(edit, t)) { const v = videos?.get(n.vid); if (v) await v.frameAt(n.ms); } // exact frames
+      composite(g, w, h, edit, t, gl, bitmaps, {}, videos); // ss = 2: Eliran scaled down, each output pixel = 2x2 rendered pixels
+      window.__rec?.probeRender?.(f, g); // local tests only: read the composed frame before encoding
       const frame = new VideoFrame(out, { timestamp: Math.round(f * 1e6 / fps), duration: Math.round(1e6 / fps) });
       venc.encode(frame, { keyFrame: f % (fps * 2) === 0 });
       frame.close();
@@ -119,7 +131,7 @@ export async function renderTake({ stage, pose, edit, take, opts, voice, bitmaps
     await venc.flush();
     if (fail) throw fail;
 
-    if (audio) await encodeAudio(audio, take.header.audio?.startMs ?? 0, frames * 1000 / fps, muxer);
+    if (audio) await encodeAudio(audio, 0, frames * 1000 / fps, muxer); // the mix is on the take clock already
     muxer.finalize();
     const blob = new Blob([muxer.target.buffer], { type: "video/mp4" });
     return { blob, ms: frames * 1000 / fps, frames, fps, w, h, codec: vcfg.codec, audio: audio?.mux ?? null };

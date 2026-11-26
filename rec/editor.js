@@ -3,14 +3,16 @@
 // and the strips move under it: drag to scrub, tap a block to edit it below the strips, drag a selected block to move
 // it. The edit (edit.js) is saved with the take on every change; "רנדר" makes the video offline (render.js).
 // Text in Hebrew; values from the take are set with textContent.
-import { readTake, PoseTrack } from "./take.js?v=7";
-import { FaceRig } from "./mapping.js?v=7";
-import { BG } from "./avatar.js?v=7";
-import { newEdit, checkEdit, newId, sceneAt, applyScene, cameraAt, COLORS, EFFECTS, DIRS, SHOTS } from "./edit.js?v=7";
-import { renderTake, support, SIZES } from "./render.js?v=7";
-import { BodyRig } from "./body.js?v=7";
-import { processVoice, voiceKey } from "./voice.js?v=7";
-import { composite, decode, mediaIds, hitImage, shownAt, ANIMS, SLIDE_DIRS, SPOTS } from "./layers.js?v=7";
+import { readTake, PoseTrack } from "./take.js?v=8";
+import { FaceRig } from "./mapping.js?v=8";
+import { BG } from "./avatar.js?v=8";
+import { newEdit, checkEdit, newId, sceneAt, applyScene, cameraAt, COLORS, EFFECTS, DIRS, SHOTS } from "./edit.js?v=8";
+import { renderTake, support, SIZES } from "./render.js?v=8";
+import { BodyRig } from "./body.js?v=8";
+import { processVoice, voiceKey } from "./voice.js?v=8";
+import { composite, decode, mediaIds, hitImage, hitVideo, shownAt, segAt, videoNeeds, mixAudio, soundKey, layoutOf,
+         SEG_KEYS, LAYOUTS, CORNER, VOL, ANIMS, SLIDE_DIRS, SPOTS } from "./layers.js?v=8";
+import { VideoSource, audioOf, drawVideo, supported as videoSupported } from "./video.js?v=8";
 
 const $ = (id) => document.getElementById(id);
 const fmtT = (ms) => {
@@ -33,6 +35,7 @@ export function createEditor(ctx) {
     root: $("editor"), title: $("ed-title"), play: $("ed-play"), time: $("ed-time"), undo: $("ed-undo"),
     zin: $("ed-zin"), zout: $("ed-zout"), set: $("ed-set"), tl: $("ed-tl"), content: $("ed-content"), add: $("ed-add"),
     addCam: $("ed-add-cam"), addFx: $("ed-add-fx"), addBg: $("ed-add-bg"), addImg: $("ed-add-img"), pick: $("ed-pick"),
+    pickVid: $("ed-pick-vid"),
     comp: $("ed-comp"),
     sheet: $("ed-sheet"), shTitle: $("ed-sh-title"), shBody: $("ed-sh-body"), shHere: $("ed-sh-here"),
     shDel: $("ed-sh-del"), shOk: $("ed-sh-ok"), close: $("ed-close"), render: $("ed-render"), saved: $("ed-saved"),
@@ -55,7 +58,7 @@ export function createEditor(ctx) {
     const body = new BodyRig(stage.vrm, stage, ctx.bodySettings);
     S = { rec, data, edit, pose: new PoseTrack(data, rig, body), dur: data.header.durationMs, tv: 0, k: 0.06,
           playing: false, sel: null, undo: [], buffer: null, raw: null, voiceKey: null, src: null, rendering: false,
-          bmp: new Map(), thumbs: new Map() };
+          bmp: new Map(), thumbs: new Map(), videos: new Map(), sounds: new Map(), mix: null, mixKey: null, notes: new Map() };
     await loadMedia(mediaIds(edit));
     if (data.audio) {
       try {
@@ -64,6 +67,7 @@ export function createEditor(ctx) {
         await voiceNow();
       } catch (e) { console.warn("editor audio", e); }
     }
+    remix();
     showSaved(rec.edit ? "saved" : "new");
     ctx.say("");
     ui.title.textContent = rec.name;
@@ -82,6 +86,7 @@ export function createEditor(ctx) {
     const ok = await flushSave();
     if (!S) return;
     for (const b of S.bmp.values()) b?.close?.();
+    for (const v of S.videos.values()) v?.close?.();
     S = null;
     ui.root.hidden = true;
     document.body.classList.remove("editing");
@@ -103,8 +108,23 @@ export function createEditor(ctx) {
     const s0 = S, buf = await processVoice(S.raw, ctx.voiceSettings);
     if (S !== s0) return;
     S.buffer = buf; S.voiceKey = key;
+    S.mixKey = null;
+    remix();
+  }
+  // The sound played in the editor: the voice + the background videos' sound (layers.js mixAudio, as the render).
+  // Mixed again only when the voice or the video segments change; playback goes on from the same point.
+  function remix() {
+    if (!S) return;
+    const sr = S.buffer?.sampleRate || ctx.getAudio()?.sampleRate || 48000;
+    const key = soundKey(S.edit) + "|" + S.voiceKey + "|" + sr + "|" + [...S.sounds.keys()].join(",");
+    if (key === S.mixKey) return;
+    S.mixKey = key;
+    const sounds = new Map([...S.sounds].filter(([, b]) => b && b.sampleRate === sr));
+    S.mix = mixAudio({ voice: S.buffer, voiceStart: S.data.header.audio?.startMs ?? 0, edit: S.edit, sounds, lengthMs: S.dur, sampleRate: sr });
     if (S.playing) { pause(); play(); }
   }
+  let mixTimer = null;
+  const remixSoon = () => { clearTimeout(mixTimer); mixTimer = setTimeout(remix, 150); };
   let voiceTimer = null;
   function voiceChanged() { clearTimeout(voiceTimer); voiceTimer = setTimeout(() => voiceNow().catch((e) => console.warn("voice", e)), 250); }
 
@@ -116,6 +136,7 @@ export function createEditor(ctx) {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(flushSave, 400);
     showSaved("dirty");
+    remixSoon();
     draw();
   }
   // -> Promise: true saved, false failed, undefined nothing to save.
@@ -154,12 +175,12 @@ export function createEditor(ctx) {
     ui.play.textContent = "❚❚";
     const ac = ctx.getAudio(), now = performance.now();
     S.p0 = { perf: now, tv: S.tv };
-    if (S.buffer && ac) {
-      const when = ac.currentTime + 0.06, off = (S.tv - (S.data.header.audio?.startMs ?? 0)) / 1000;
+    if (S.mix && ac) { // the mix is on the take clock (layers.js mixAudio)
+      const when = ac.currentTime + 0.06, off = S.tv / 1000;
       const src = ac.createBufferSource();
-      src.buffer = S.buffer;
+      src.buffer = S.mix;
       src.connect(ac.destination);
-      if (off >= 0) src.start(when, off); else src.start(when - off, 0);
+      src.start(when, Math.min(off, S.mix.duration));
       S.src = src;
       S.p0 = { ac: when, tv: S.tv };
     }
@@ -188,6 +209,7 @@ export function createEditor(ctx) {
     }
     S.pose.at(S.tv);
     applyScene(stage, sceneAt(S.edit, S.tv, stage));
+    for (const n of videoNeeds(S.edit, S.tv)) S.videos.get(n.vid)?.want(n.ms); // the preview: the latest frame wins
     place();
   }
 
@@ -240,10 +262,12 @@ export function createEditor(ctx) {
     for (const e of edit.effects) item(1, e.id, e.t, e.dur * k, EFFECTS[e.type]?.name + (e.dir && (e.type === "enter" || e.type === "exit") ? " " + DIRS[e.dir] : ""), "#FF8FCF");
     // background: segments to the next change
     const bgs = [...edit.bg].sort((a, b) => a.t - b.t);
-    const segs = [{ id: "bg0", t: 0, color: edit.bg0, img: edit.bg0img }, ...bgs];
+    const segs = [{ id: "bg0", t: 0, color: edit.bg0, img: edit.bg0img, vid: edit.bg0vid, layout: edit.bg0layout }, ...bgs];
     segs.forEach((b, i) => {
-      const end = segs[i + 1]?.t ?? dur, name = b.img ? "🖼 תמונה" : COLORS.find((x) => x.color.toLowerCase() === b.color.toLowerCase())?.name || b.color;
-      withThumb(item(2, b.id, b.t, (end - b.t) * k, name, b.color, light(b.color) ? "#16101C" : "#FFF6EE"), b.img);
+      const end = segs[i + 1]?.t ?? dur;
+      const name = b.vid ? (S.videos.get(b.vid) ? "🎬 " + LAYOUTS[layoutOf(b)] : "⚠ וידאו חסר") : b.img ? "🖼 תמונה"
+        : COLORS.find((x) => x.color.toLowerCase() === b.color.toLowerCase())?.name || b.color;
+      withThumb(item(2, b.id, b.t, (end - b.t) * k, name, b.color, light(b.color) ? "#16101C" : "#FFF6EE"), b.vid || b.img);
     });
     // images
     for (const m of edit.media) {
@@ -290,9 +314,15 @@ export function createEditor(ctx) {
   function find(id) {
     const e = S.edit;
     if (id === "cam0") return e.cam0;
-    if (id === "bg0") return { id: "bg0", t: 0, get color() { return e.bg0; }, set color(v) { e.bg0 = v; },
-      get img() { return e.bg0img; }, set img(v) { e.bg0img = v; }, get fit() { return e.bg0fit; }, set fit(v) { e.bg0fit = v; },
-      get kb() { return e.bg0kb; }, set kb(v) { e.bg0kb = v; } };
+    // the start segment: its fields live on the edit as bg0 (the color) and bg0<field> (layers.js SEG_KEYS)
+    if (id === "bg0") return new Proxy({}, {
+      get: (_, k) => (k === "id" ? "bg0" : k === "t" || k === "fade" ? 0 : k === "color" ? e.bg0 : SEG_KEYS.includes(k) ? e["bg0" + k] : undefined),
+      set: (_, k, v) => {
+        if (k === "color") e.bg0 = v;
+        else if (SEG_KEYS.includes(k)) { if (v === undefined) delete e["bg0" + k]; else e["bg0" + k] = v; }
+        return true;
+      },
+    });
     return e.camera.find((x) => x.id === id) || e.effects.find((x) => x.id === id) || e.bg.find((x) => x.id === id)
       || e.media.find((x) => x.id === id) || null;
   }
@@ -332,9 +362,18 @@ export function createEditor(ctx) {
     S.edit.effects.push(fx); changed(before); select(fx.id);
   };
   ui.addBg.onclick = () => {
-    const before = snap(), cur = sceneAt(S.edit, S.tv, stage).bg.toLowerCase();
-    const color = (COLORS.find((c) => c.color.toLowerCase() !== cur && c.color !== BG) || COLORS[1]).color;
-    const b = { id: newId(), t: Math.round(S.tv), color, fade: 0 };
+    const before = snap(), t = Math.round(S.tv), { cur: seg } = segAt(S.edit, t);
+    let b;
+    if (seg.vid) { // a change while a video plays: the same video goes on (to change the layout mid-video)
+      b = { id: newId(), t, color: seg.color, fade: 0, vid: seg.vid, vfrom: Math.round((seg.vfrom || 0) + t - seg.t),
+            layout: layoutOf(seg) === "full" ? "split" : "full", fit: seg.fit, vol: seg.vol ?? VOL,
+            vx: seg.vx, vy: seg.vy, vw: seg.vw };
+      for (const k of Object.keys(b)) if (b[k] === undefined) delete b[k];
+    } else {
+      const cur = sceneAt(S.edit, S.tv, stage).bg.toLowerCase();
+      const color = (COLORS.find((c) => c.color.toLowerCase() !== cur && c.color !== BG) || COLORS[1]).color;
+      b = { id: newId(), t, color, fade: 0 };
+    }
     S.edit.bg.push(b); changed(before); select(b.id);
   };
 
@@ -350,18 +389,21 @@ export function createEditor(ctx) {
     }
     return wrap;
   }
-  function slider(label, min, max, step, value, set, ends) {
-    const wrap = el("div", "ed-field ed-slide"), input = el("input");
+  function slider(label, min, max, step, value, set, ends, show) {
+    const wrap = el("div", "ed-field ed-slide"), input = el("input"), val = show ? el("output", "ed-val") : null;
     Object.assign(input, { type: "range", min, max, step, value });
     input.dir = "ltr";
     let before = null;
+    const paint = () => { if (val) val.textContent = show(Number(input.value)); };
+    paint();
     input.onpointerdown = () => { before = snap(); };
-    input.oninput = () => { if (!before) before = snap(); set(Number(input.value)); S.edit.updated = Date.now(); showSaved("dirty"); };
+    input.oninput = () => { if (!before) before = snap(); set(Number(input.value)); paint(); S.edit.updated = Date.now(); showSaved("dirty"); };
     input.onchange = () => { changed(before); before = null; };
     const l = el("span", "ed-lbl2", label);
     const r = el("div", "ed-ends");
     if (ends) r.append(el("span", "", ends[0]), input, el("span", "", ends[1])); else r.append(input);
     wrap.append(l, r);
+    if (val) wrap.append(val);
     return wrap;
   }
   function sheet() {
@@ -413,13 +455,15 @@ export function createEditor(ctx) {
       );
     } else {
       ui.shTitle.textContent = `רקע · ${at}`;
-      body.append(imageField(it, true));
-      if (it.img) body.append(
+      body.append(videoField(it));
+      if (it.vid) body.append(...videoOptions(it));
+      else body.append(imageField(it, true));
+      if (it.img && !it.vid) body.append(
         chips("התאמה", [["cover", "ממלאת את המסך"], ["contain", "כולה, צבע מסביב"]], it.fit === "contain" ? "contain" : "cover", (v) => { it.fit = v; }),
         chips("תנועה", [[false, "סטטית"], [true, "זום איטי"]], !!it.kb, (v) => { it.kb = v; }),
       );
       const wrap = el("div", "ed-field"), row = el("div", "ed-swatches");
-      wrap.append(el("span", "ed-lbl2", it.img ? "צבע מסביב" : "צבע"), row);
+      wrap.append(el("span", "ed-lbl2", it.img || it.vid ? "צבע מסביב" : "צבע"), row);
       for (const c of COLORS) {
         const b = el("button", "sw");
         b.style.background = c.color;
@@ -443,13 +487,50 @@ export function createEditor(ctx) {
   };
   async function loadMedia(ids) {
     for (const id of ids) {
-      if (S.bmp.has(id)) continue;
+      if (S.bmp.has(id) || S.videos.has(id)) continue;
+      let m = null;
+      try { m = await ctx.media.get(id); } catch (e) { console.warn("media", id, e); }
+      if (m?.kind === "video") { await loadVideo(id, m.blob); continue; }
       let bmp = null;
-      try { const m = await ctx.media.get(id); if (m?.blob) bmp = await decode(m.blob); } catch (e) { console.warn("media", id, e); }
+      try { if (m?.blob) bmp = await decode(m.blob); } catch (e) { console.warn("media", id, e); }
       S.bmp.set(id, bmp);
       if (bmp) S.thumbs.set(id, thumbOf(bmp));
     }
   }
+  // A background video (video.js): the source (exact frames), a thumbnail of its first frame, its sound (in the
+  // background; the mix follows). -> the source, or throws (the reason in e.message, see videoError).
+  async function loadVideo(id, blob) {
+    const s0 = S;
+    let src = null;
+    try {
+      if (!blob) throw new Error("missing");
+      src = await VideoSource.open(blob);
+      const f = await src.frameAt(0), c = document.createElement("canvas"), k = 64 / Math.max(src.w, src.h);
+      c.width = Math.max(1, Math.round(src.w * k)); c.height = Math.max(1, Math.round(src.h * k));
+      const g = c.getContext("2d");
+      drawVideo(g, f, src.rot, 0, 0, c.width, c.height);
+      if (S !== s0) { src.close(); return null; }
+      S.thumbs.set(id, c.toDataURL("image/png"));
+      S.videos.set(id, src);
+    } catch (e) {
+      console.warn("video", id, e);
+      src?.close();
+      if (S === s0) S.videos.set(id, null);
+      throw e;
+    }
+    if (src.audio) {
+      const sr = S.buffer?.sampleRate || ctx.getAudio()?.sampleRate || 48000;
+      audioOf(blob, sr).then((buf) => { if (S === s0 && S.videos.get(id) === src) { S.sounds.set(id, buf); S.mixKey = null; remix(); } });
+    }
+    return src;
+  }
+  const videoError = (e) => {
+    const m = String(e?.message || "");
+    if (m === "no-decoder") return "הדפדפן הזה לא יודע לפענח וידאו (WebCodecs). לפתוח את הדף ב-Chrome מעודכן.";
+    if (m === "not-mp4" || m === "no-video") return "לא הצלחתי לקרוא את הווידאו. לבחור קובץ MP4 או MOV (כמו שהטלפון מצלם).";
+    if (m.startsWith("codec:")) return `הטלפון לא יודע לפענח את הווידאו הזה (${m.slice(6)}). לבחור וידאו קטן יותר, עד 1080p, ב-H.264.`;
+    return "לא הצלחתי לפתוח את הווידאו.";
+  };
   // Opens the phone's picker -> {id, type} of the new media, or null (cancelled / unreadable / no room).
   function pickImage() {
     return new Promise((resolve) => {
@@ -497,6 +578,76 @@ export function createEditor(ctx) {
     if (it.img && !S.bmp.get(it.img)) row.append(el("span", "ed-warn", "⚠ התמונה לא נמצאה בטלפון"));
     return wrap;
   }
+  // ---- background video (version 8, video.js) -----------------------------------------------------------------
+  function pickVideo() {
+    return new Promise((resolve) => {
+      const inp = ui.pickVid;
+      inp.value = "";
+      inp.onchange = async () => { inp.onchange = inp.oncancel = null; const f = inp.files?.[0]; resolve(f ? await addVideo(f) : null); };
+      inp.oncancel = () => { inp.onchange = inp.oncancel = null; resolve(null); };
+      inp.click();
+    });
+  }
+  async function addVideo(file) {
+    if (!S) return null;
+    if (!videoSupported()) { ctx.say(videoError(new Error("no-decoder")), true); return null; }
+    ctx.say("טוען וידאו…");
+    const id = newId();
+    let src;
+    try { src = await loadVideo(id, file); } catch (e) { ctx.say(videoError(e), true); S?.videos.delete(id); return null; }
+    if (!src || !S) return null;
+    try { await ctx.media.put({ id, blob: file, name: file.name, type: file.type, kind: "video", w: src.w, h: src.h, ms: Math.round(src.ms), at: Date.now() }); }
+    catch (e) { console.error(e); src.close(); S.videos.delete(id); ctx.say("לא הצלחתי לשמור את הווידאו בטלפון (אין מקום?). לנסות וידאו קצר יותר.", true); return null; }
+    const notes = [];
+    if (src.big) notes.push(`וידאו גדול (${src.w}×${src.h}): הרנדר יהיה איטי יותר. עדיף עד 1080p.`);
+    if (src.hdr) notes.push("הווידאו ב-HDR: הצבעים עלולים לצאת שטוחים או דהויים. עדיף לצלם בלי HDR.");
+    S.notes.set(id, notes);
+    ctx.say(notes.join(" "));
+    if (notes.length) setTimeout(() => ctx.say(""), 6000);
+    return { id, src };
+  }
+  // The "וידאו" row of a background panel: pick / replace / remove.
+  function videoField(it) {
+    const wrap = el("div", "ed-field"), row = el("div", "chips");
+    wrap.append(el("span", "ed-lbl2", "וידאו"), row);
+    const b = el("button", "", it.vid ? "🎬 החלף וידאו" : "🎬 בחר וידאו");
+    b.onclick = async () => {
+      pause();
+      const got = await pickVideo();
+      if (!got || !S) return;
+      const before = snap();
+      it.vid = got.id; it.vfrom = 0; it.img = undefined; it.kb = undefined;
+      if (!it.layout) it.layout = "full";
+      if (it.vol === undefined) it.vol = VOL;
+      changed(before); sheet();
+    };
+    row.append(b);
+    if (it.vid) {
+      const x = el("button", "", "✕ בלי וידאו");
+      x.onclick = () => { const before = snap(); for (const k of ["vid", "vfrom", "layout", "vol", "vx", "vy", "vw", "fit"]) it[k] = undefined; changed(before); sheet(); };
+      row.append(x);
+    }
+    return wrap;
+  }
+  function videoOptions(it) {
+    const src = S.videos.get(it.vid), out = [];
+    if (!src) { out.push(el("p", "ed-warn", "⚠ הווידאו לא נמצא בטלפון (או שלא נפתח). לבחור אותו שוב.")); return out; }
+    const info = `${fmtT(src.ms).replace(/\.\d$/, "")} · ${src.w}×${src.h}${src.audio ? "" : " · בלי קול"}`;
+    out.push(el("p", "ed-tip", info));
+    for (const n of S.notes.get(it.vid) || []) out.push(el("p", "ed-warn", n));
+    out.push(chips("פריסה", [["full", "מלא"], ["split", "מפוצל (וידאו למעלה)"], ["corner", "בפינה"]], layoutOf(it), (v) => {
+      it.layout = v;
+      if (v === "corner") for (const k of ["vx", "vy", "vw"]) it[k] ??= CORNER[k];
+    }));
+    if (layoutOf(it) !== "corner") out.push(chips("התאמה", [["cover", "ממלא"], ["contain", "כולו"]], it.fit === "contain" ? "contain" : "cover", (v) => { it.fit = v; }));
+    else out.push(el("p", "ed-tip", "גוררים את חלון הווידאו על המסך, וצובטים בשתי אצבעות כדי לשנות את הגודל."));
+    out.push(slider("מאיפה בווידאו", 0, Math.max(100, Math.floor(src.ms / 100) * 100), 100, it.vfrom || 0, (v) => { it.vfrom = v; }, null, (v) => fmtT(v)));
+    if (src.ms - (it.vfrom || 0) < (segAt(S.edit, it.t).end === Infinity ? S.dur : segAt(S.edit, it.t).end) - it.t)
+      out.push(el("p", "ed-tip", "הווידאו נגמר לפני הקטע: התמונה האחרונה נשארת עד סוף הקטע, בלי קול."));
+    if (src.audio) out.push(slider("עוצמת הקול", 0, 100, 5, Math.round((it.vol ?? VOL) * 100), (v) => { it.vol = v / 100; }, ["🔇", "🔊"], (v) => `${v}%`));
+    return out;
+  }
+
   ui.addImg.onclick = async () => {
     if (!S || S.rendering) return;
     pause();
@@ -518,8 +669,8 @@ export function createEditor(ctx) {
   function drawn() {
     if (!S || S.rendering) return;
     g2 ??= ui.comp.getContext("2d", { alpha: false });
-    const sel = S.sel && S.edit.media.some((m) => m.id === S.sel) ? S.sel : null;
-    composite(g2, ui.comp.width, ui.comp.height, S.edit, S.tv, stage.renderer.domElement, S.bmp, { sel });
+    const sel = S.sel && (S.edit.media.some((m) => m.id === S.sel) || kindOf(S.sel) === "bg") ? S.sel : null;
+    composite(g2, ui.comp.width, ui.comp.height, S.edit, S.tv, stage.renderer.domElement, S.bmp, { sel }, S.videos);
   }
   // On the preview: tap an image to select it, drag it to move, pinch to resize (the selected image). The gestures
   // are on the whole stage area, so a pinch works when a finger lands beside the (small) preview.
@@ -531,15 +682,25 @@ export function createEditor(ctx) {
     surface.setPointerCapture(e.pointerId);
     if (pts.size === 1) {
       const r = ui.comp.getBoundingClientRect();
-      const hit = hitImage(S.edit, S.tv, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height, S.bmp);
-      const m = hit || S.edit.media.find((x) => x.id === S.sel) || null;
+      const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+      // an image first, then the corner video (version 8); else the selected one of them goes on moving
+      const hitM = hitImage(S.edit, S.tv, fx, fy, S.bmp), hitV = !hitM && hitVideo(S.edit, S.tv, fx, fy, S.videos);
+      const selM = S.edit.media.find((x) => x.id === S.sel);
+      const selV = !selM && S.sel && kindOf(S.sel) === "bg" && segAt(S.edit, S.tv).cur.id === S.sel && layoutOf(find(S.sel)) === "corner";
+      let m = null, keys = null;
+      if (hitM || (!hitV && selM)) { m = hitM || selM; keys = ["x", "y", "w"]; }
+      else if (hitV || selV) {
+        m = find(hitV ? hitV.id : S.sel); keys = ["vx", "vy", "vw"];
+        for (const k of keys) m[k] ??= CORNER[k];
+      }
       if (!m) { gest = null; return; }
       pause();
-      if (hit && hit.id !== S.sel) select(hit.id);
-      gest = { m, before: snap(), x0: e.clientX, y0: e.clientY, mx: m.x, my: m.y, w0: m.w, d0: 0, moved: false };
+      if (m.id !== S.sel) select(m.id);
+      const [kx, ky, kw] = keys;
+      gest = { m, kx, ky, kw, before: snap(), x0: e.clientX, y0: e.clientY, mx: m[kx], my: m[ky], w0: m[kw], d0: 0, moved: false };
     } else if (gest && pts.size === 2) {
       const [a, b] = [...pts.values()];
-      gest.d0 = Math.hypot(a.x - b.x, a.y - b.y); gest.w0 = gest.m.w;
+      gest.d0 = Math.hypot(a.x - b.x, a.y - b.y); gest.w0 = gest.m[gest.kw];
     }
   });
   surface.addEventListener("pointermove", (e) => {
@@ -548,12 +709,12 @@ export function createEditor(ctx) {
     const m = gest.m, r = ui.comp.getBoundingClientRect();
     if (pts.size >= 2 && gest.d0 > 0) {
       const [a, b] = [...pts.values()];
-      m.w = Math.round(Math.min(1.5, Math.max(0.08, gest.w0 * Math.hypot(a.x - b.x, a.y - b.y) / gest.d0)) * 1000) / 1000;
+      m[gest.kw] = Math.round(Math.min(1.5, Math.max(0.08, gest.w0 * Math.hypot(a.x - b.x, a.y - b.y) / gest.d0)) * 1000) / 1000;
     } else if (pts.size === 1) {
       const dx = e.clientX - gest.x0, dy = e.clientY - gest.y0;
       if (!gest.moved && Math.hypot(dx, dy) < 6) return;
-      m.x = Math.round(Math.min(1.2, Math.max(-0.2, gest.mx + dx / r.width)) * 1000) / 1000;
-      m.y = Math.round(Math.min(1.2, Math.max(-0.2, gest.my + dy / r.height)) * 1000) / 1000;
+      m[gest.kx] = Math.round(Math.min(1.2, Math.max(-0.2, gest.mx + dx / r.width)) * 1000) / 1000;
+      m[gest.ky] = Math.round(Math.min(1.2, Math.max(-0.2, gest.my + dy / r.height)) * 1000) / 1000;
     }
     gest.moved = true;
     S.edit.updated = Date.now(); showSaved("dirty");
@@ -563,7 +724,7 @@ export function createEditor(ctx) {
     if (!gest) return;
     if (pts.size === 1) { // the pinch ended with one finger left: go on dragging from here
       const [p] = [...pts.values()];
-      Object.assign(gest, { x0: p.x, y0: p.y, mx: gest.m.x, my: gest.m.y, d0: 0 });
+      Object.assign(gest, { x0: p.x, y0: p.y, mx: gest.m[gest.kx], my: gest.m[gest.ky], d0: 0 });
       return;
     }
     if (pts.size === 0) {
@@ -631,7 +792,7 @@ export function createEditor(ctx) {
     const t0 = performance.now(), src = S.rec;
     try {
       const res = await renderTake({
-        stage, pose: S.pose, edit: S.edit, take: S.data, voice: ctx.voiceSettings, bitmaps: S.bmp,
+        stage, pose: S.pose, edit: S.edit, take: S.data, voice: ctx.voiceSettings, bitmaps: S.bmp, videos: S.videos,
         opts: { ...opts, signal: job, onProgress: ({ frame, frames, fps }) => {
           ui.rFill.style.width = `${(100 * frame / frames).toFixed(1)}%`;
           const left = (frames - frame) / Math.max(0.1, fps) * 1000;

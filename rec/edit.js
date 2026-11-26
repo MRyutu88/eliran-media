@@ -20,9 +20,14 @@
 //     media:   [{id, t, dur, img, x, y, w, rot, anim, dir?, style, layer}]  images that pop up from t for dur ms:
 //              x/y = center as a fraction of the frame (from the left / top), w = width as a fraction of the frame,
 //              rot degrees, anim "pop"|"slide"|"fade"|"cut" (dir "right"|"left"|"up"|"down" for slide),
-//              style "plain"|"sticker" (cream border + shadow), layer "front"|"back" (behind Eliran). }
+//              style "plain"|"sticker" (cream border + shadow), layer "front"|"back" (behind Eliran).
+//     Since page version 8 (optional fields, video.js, layers.js): a background segment can be a video instead of an
+//     image: vid (media id, IndexedDB "media:<id>" with kind "video"), vfrom (ms into the video at the segment start),
+//     layout "full"|"split"|"corner", fit (as for images, full/split), vol (0..1, default 0.5), vx/vy/vw (the corner
+//     window: center as frame fractions, width as a frame-width fraction); for the start segment bg0vid, bg0vfrom, …
+//     After the video's end its last frame stays (silent) until the next change. }
 // A new optional field = same version; a changed meaning = version 2 (readers refuse newer versions).
-import { BG } from "./avatar.js?v=7";
+import { BG } from "./avatar.js?v=8";
 
 export const EDIT_VERSION = 1;
 
@@ -54,7 +59,7 @@ export function checkEdit(e) {
   e.media ??= [];
   return e;
 }
-export const isEmpty = (e) => !e.camera.length && !e.effects.length && !e.bg.length && !e.media?.length && !e.bg0img;
+export const isEmpty = (e) => !e.camera.length && !e.effects.length && !e.bg.length && !e.media?.length && !e.bg0img && !e.bg0vid;
 
 // ---- easing -------------------------------------------------------------------------------------------------
 const clamp01 = (x) => Math.min(1, Math.max(0, x));

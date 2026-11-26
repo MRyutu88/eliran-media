@@ -19,7 +19,8 @@
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/",
   "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js",
   "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs",
-  "mp4-muxer": "https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.mjs"
+  "mp4-muxer": "https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.mjs",
+  "mp4box": "https://cdn.jsdelivr.net/npm/mp4box@2.4.1/dist/mp4box.all.mjs"
 } }
 </script>
 <style>
@@ -105,6 +106,8 @@
   .it.img { background-size: auto 100%; background-repeat: repeat-x; background-position: right center; color: #fff;
             text-shadow: 0 0 3px #000, 0 0 2px #000; }
   .ed-tip { margin: 0; font-size: 12px; color: var(--dim); }
+  .ed-val { font: 12px ui-monospace, Consolas, monospace; color: var(--cream); min-width: 44px; text-align: center; direction: ltr; }
+  p.ed-warn { margin: 0; }
   .ed-warn { font-size: 12px; color: var(--raspberry); font-weight: 700; align-self: center; }
   /* the strip names sit under the blocks (shown where a strip is empty) */
   .ed-names { position: absolute; top: 18px; right: 6px; pointer-events: none; display: flex; flex-direction: column; z-index: 0; }
@@ -241,6 +244,7 @@
     <button id="ed-add-bg">+ רקע</button>
     <button id="ed-add-img">+ תמונה</button>
     <input id="ed-pick" type="file" accept="image/*" hidden>
+    <input id="ed-pick-vid" type="file" accept="video/mp4,video/quicktime,video/*" hidden>
   </div>
   <div id="ed-sheet" hidden>
     <div class="ed-sh-top">
@@ -305,7 +309,7 @@
 <!-- REC_VERSION: bump it here, in app.js and in every local import ("?v=") on each publish (docs/phone_recording.md,
      "Updates and the phone's cache"). GitHub Pages lets the phone cache each file for 10 minutes; mixed old/new files
      crashed the page on "טוען…" (25.11). -->
-<meta name="rec-version" content="7">
+<meta name="rec-version" content="8">
 <script>
   // Boot guard: if the page code fails to load or crashes before it starts, say so (with a fresh reload) instead of
   // "טוען…" forever.
@@ -328,6 +332,6 @@
     setTimeout(function () { fail("לקח יותר מדי זמן, אולי אין אינטרנט"); }, 40000);
   })();
 </script>
-<script type="module" src="app.js?v=7" onerror="__recBootFail('קובץ חסר')"></script>
+<script type="module" src="app.js?v=8" onerror="__recBootFail('קובץ חסר')"></script>
 </body>
 </html>

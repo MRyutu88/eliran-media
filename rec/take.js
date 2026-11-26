@@ -14,8 +14,8 @@
 //                                                   order], matrix[16] (MediaPipe facialTransformationMatrix, column-major)
 //       "render"   Float64[render.count]            render frame times, ms since t0 (one video frame each)
 //       "audio"    raw bytes of the mic recording (header.audio.type), when there was a mic
-import { MAPPING } from "./mapping.js?v=7";
-import { STEP_MS, OUT_LEN } from "./body.js?v=7";
+import { MAPPING } from "./mapping.js?v=8";
+import { STEP_MS, OUT_LEN } from "./body.js?v=8";
 const clampN = (v, a, b) => Math.min(b, Math.max(a, v));
 
 const MAGIC = "ELIRANPF", VERSION = 1;

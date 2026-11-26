@@ -3,19 +3,19 @@
 // (play, share, save, delete) -> "נגן מחדש" drives Eliran from the file, and can record that to a new video ->
 // "ערוך" opens the timeline editor on the take (editor.js), which renders the edit offline to an MP4 (render.js).
 // Text in Hebrew; values from files are set with textContent.
-import { createStage } from "./avatar.js?v=7";
-import { createTracker } from "./tracking.js?v=7";
-import { FaceRig } from "./mapping.js?v=7";
-import { startRecording, pickType, frameDrawn } from "./recorder.js?v=7";
-import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=7";
-import { createEditor } from "./editor.js?v=7";
-import { mediaIds } from "./layers.js?v=7";
-import { BodyRig, GROUPS, DEFAULTS, loadSettings, saveSettings, loadPresets, savePresets, checkPresets, checkSettings, sameSettings, PRESET_FILE } from "./body.js?v=7";
-import { VOICE_PRESETS, VOICE_DEFAULTS, checkVoice, loadVoice, saveVoice, applyPreset, presetOf, processVoice, createLiveVoice, workletSupported } from "./voice.js?v=7";
+import { createStage } from "./avatar.js?v=8";
+import { createTracker } from "./tracking.js?v=8";
+import { FaceRig } from "./mapping.js?v=8";
+import { startRecording, pickType, frameDrawn } from "./recorder.js?v=8";
+import { TakeWriter, readTake, createReplay, EXT } from "./take.js?v=8";
+import { createEditor } from "./editor.js?v=8";
+import { mediaIds } from "./layers.js?v=8";
+import { BodyRig, GROUPS, DEFAULTS, loadSettings, saveSettings, loadPresets, savePresets, checkPresets, checkSettings, sameSettings, PRESET_FILE } from "./body.js?v=8";
+import { VOICE_PRESETS, VOICE_DEFAULTS, checkVoice, loadVoice, saveVoice, applyPreset, presetOf, processVoice, createLiveVoice, workletSupported } from "./voice.js?v=8";
 
 // Must match <meta name="rec-version"> in index.html. A different value = the phone mixed cached files from two
 // versions: reload once with a fresh URL (index.html then comes fresh and asks for matching files).
-const REC_VERSION = "7";
+const REC_VERSION = "8";
 if (document.querySelector('meta[name="rec-version"]')?.content !== REC_VERSION) {
   const key = "rec-reload-" + REC_VERSION;
   if (!sessionStorage.getItem(key)) {
@@ -78,7 +78,7 @@ const putTake = (t) => idb("readwrite", (s) => s.put(t), TAKES);
 const allTakes = async () => ((await idb("readonly", (s) => s.getAll(), TAKES)) || []).sort((a, b) => b.at - a.at);
 const delTake = (id) => idb("readwrite", (s) => s.delete(id), TAKES);
 // Images for the editor (layers.js), version 7: in the same "files" store under "media:<id>" (no database upgrade):
-// {id, blob, name, type, w, h, at}. They stay while any take's edit uses them (gcMedia after a delete / editor close).
+// {id, blob, name, type, w, h, at} (+ kind: "video", ms since version 8). They stay while any take's edit uses them (gcMedia after a delete / editor close).
 const putMedia = (m) => idb("readwrite", (s) => s.put(m, "media:" + m.id));
 const getMedia = (id) => idb("readonly", (s) => s.get("media:" + id));
 async function gcMedia() {
